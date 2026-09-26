@@ -375,14 +375,14 @@ Rows that measure the scan, not your edit; hover for details. A row with nothing
 
 *   **Auto** (magic wand on the CROP header): detect the frame edge and crop to it. Its settings and the whole-roll run are on the Roll tab's **Crop** card ([§10.4](#104-crop)).
 *   **Ratio**: the roll's crop ratio, the same field as on the Crop card; the crop tool snaps to it.
-*   **Crop** tool (crop icon on the CROP header): draw a crop rectangle; when **Ratio** is **Free**, drag an edge midpoint to resize one axis. It opens on the current crop, including one **Auto** found; after a manual change nothing re-detects over it. **Reset** (undo icon on the CROP header) clears it and turns auto-crop off.
+*   **Crop** tool (crop icon on the CROP header): draw a crop rectangle; when **Ratio** is **Free**, drag an edge midpoint to resize one axis. It opens on the current crop, including one **Auto** found; after a manual change nothing re-detects over it. Move the pointer past the edge of the visible viewport to pan during a crop draw, move, or resize.. **Reset** (undo icon on the CROP header) clears it and turns auto-crop off.
 *   **Guide**: *Thirds*, *Phi Grid*, *Diagonals*, *Golden Triangles*, *Golden Spiral*, *Armature*, *Diagonal Method*, *Grid* or *Off*. The redo button rotates guides with orientations (spiral 8, triangles 2).
 
 **Alignment:**
 
 *   **Crop by Default** (crop icon, right end of the ALIGNMENT header): crop the wedge Fine Rotation, Tilt and Swing leave, so no edge shows extrapolated pixels. Live, only while no manual or auto crop is set. While you adjust a slider below, the canvas briefly darkens the margin it trims.
 *   **Fine Rotation** (±45°): sub-degree rotation, positive clockwise. Applied after auto-crop.
-*   **Straighten** tool (ruler, on the ALIGNMENT header): draw a line along a horizon or vertical edge to level or plumb it.
+*   **Straighten** tool (ruler, on the ALIGNMENT header): draw a line along a horizon or vertical edge to level or plumb it. Move the pointer past the edge of the viewport to pan during drawing.
 *   **Tilt** (±15%): tip the easel about a horizontal axis to correct converging verticals. Positive stretches the top edge. The unit is percent of the frame, not an angle.
 *   **Swing** (±15%): the same about a vertical axis, for converging horizontals. Positive stretches the left edge.
 
