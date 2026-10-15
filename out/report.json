@@ -1,0 +1,107 @@
+{
+  "model": {
+    "model_id": "nvidia/segformer-b0-finetuned-ade-512-512",
+    "model_path": "/Users/matt/.cache/huggingface/hub/models--nvidia--segformer-b0-finetuned-ade-512-512/snapshots/b9175de73a0a34f7843135853d27629aa6987b2f/onnx/model.onnx",
+    "sky_class_index": 2,
+    "class_count": 150,
+    "input_layout": "NCHW RGB float32",
+    "resize": {
+      "height": 767,
+      "width": 512,
+      "policy": "fixed model size or shortest edge 512"
+    },
+    "normalization_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "normalization_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "model_revision": "b9175de73a0a34f7843135853d27629aa6987b2f",
+    "license": "NVIDIA Source Code License for SegFormer; research/evaluation use only, non-commercial"
+  },
+  "input": {
+    "width": 2703,
+    "height": 4051,
+    "dtype": "uint16",
+    "photometric": "2",
+    "samples_per_pixel": 3,
+    "planar_configuration": "1",
+    "icc_profile_present": true,
+    "representation": "a98c",
+    "input_primaries": "Adobe RGB (1998)",
+    "icc_profile_description": "A98C",
+    "icc_conversion": "Adobe RGB (1998) gamma and matrix primaries converted to linear sRGB",
+    "log_display_mapping": null,
+    "path": "/Users/matt/devel/NegPy/Luxembourg_Frame001_R.tiff"
+  },
+  "output": {
+    "path": "out/output.tif",
+    "representation": "a98c",
+    "dtype": "uint16",
+    "channels": 3,
+    "mode": "localized"
+  },
+  "parameters": {
+    "contrast_strength": 0.5,
+    "blur_percent_short_side": 4.0,
+    "guided_radius": 12,
+    "guided_epsilon": 0.001,
+    "trimap_sky_threshold": 0.95,
+    "trimap_foreground_threshold": 0.05,
+    "log_min_log2": null,
+    "log_max_log2": null
+  },
+  "contrast_mask": {
+    "method": "positive-image pseudo-density approximation",
+    "reference_formula": "D' = D - g * blur(D) + const",
+    "assumption": "pseudo-density is -log10(linear sRGB luminance); its 1st-to-99th percentile range sets exposure strength",
+    "working_space": "linear RGB with sRGB primaries",
+    "density_range": 1.6297548251213612,
+    "sigma_pixels": 108.12,
+    "plane_mean": -1.2801566220737312e-08
+  },
+  "trimap": {
+    "unknown_pixels": 374225,
+    "unknown_fraction": 0.03417625789131598,
+    "definite_sky_pixels": 1511463,
+    "definite_sky_fraction": 0.13803500375758468,
+    "definite_foreground_pixels": 9064165,
+    "definite_foreground_fraction": 0.8277887383510993,
+    "total_pixels": 10949853,
+    "sky_threshold": 0.95,
+    "foreground_threshold": 0.05
+  },
+  "alpha": {
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "clamped_pixels": 0
+  },
+  "clipping": {
+    "global_linear": {
+      "out_of_range_samples": 925522,
+      "out_of_range_fraction": 0.028174563926413747,
+      "minimum": -0.0022819254536807837,
+      "maximum": 1.391301279278733
+    },
+    "localized_linear": {
+      "out_of_range_samples": 925522,
+      "out_of_range_fraction": 0.028174563926413747,
+      "minimum": -0.003487259985241607,
+      "maximum": 1.391301279278733
+    },
+    "encoded_output": {
+      "out_of_range_samples": 923170,
+      "out_of_range_fraction": 0.0281029647917039,
+      "minimum": 0.05239948119325551,
+      "maximum": 1.1538174191272
+    },
+    "policy": "report out-of-range values, then clip only when encoding the 16-bit TIFF"
+  },
+  "warnings": [
+    "Some output samples are outside the representable range and will be clipped"
+  ]
+}

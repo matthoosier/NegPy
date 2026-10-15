@@ -1,0 +1,11 @@
+numpy==2.4.4
+scipy==1.17.1
+numba==0.65.1
+tifffile==2026.6.1
+imagecodecs==2026.6.6
+onnxruntime==1.23.2
+huggingface-hub==0.36.2
+opencv-contrib-python-headless==4.13.0.92
+Pillow==12.2.0
+PyMatting==1.1.15
+pytest==9.0.2
