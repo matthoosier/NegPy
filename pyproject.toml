@@ -27,6 +27,8 @@ dependencies = [
     "wgpu==0.31.1",
     "pyserial>=3.5",
     "negpy-core",
+    "opencv-contrib-python-headless==4.13.0.92",
+    "pymatting==1.1.15",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -54,8 +56,6 @@ dev = [
     "pytest-cov>=7.0",
     "ruff==0.14.10",
     "ty>=0.0.26",
-    # The test oracle for the negpy_core kernels that port OpenCV; the app imports no cv2.
-    "opencv-python-headless==4.13.0.92",
 ]
 sane = [
     "python-sane>=2.9",

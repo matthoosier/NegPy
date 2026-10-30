@@ -1,6 +1,7 @@
 from dataclasses import replace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from negpy.desktop.session import AppState
@@ -143,6 +144,69 @@ def test_split_matte_toggle_and_active_area_update_config(qapp):
 
     sidebar.contrast_mask_matte_area_combo.setCurrentIndex(sidebar.contrast_mask_matte_area_combo.findData(ContrastMaskArea.RIGHT))
     assert controller.apply_config.call_args.args[0].exposure.contrast_mask_matte_area == ContrastMaskArea.RIGHT
+
+
+def test_sky_matte_button_follows_split_matte_toggle(qapp):
+    controller = MagicMock()
+    controller.state = AppState()
+    sidebar = ToneSidebar(controller)
+
+    assert sidebar.show_sky_matte_btn.isHidden()
+    sidebar.contrast_mask_split_matte_btn.setChecked(True)
+    assert not sidebar.show_sky_matte_btn.isHidden()
+    sidebar.contrast_mask_split_matte_btn.setChecked(False)
+    assert sidebar.show_sky_matte_btn.isHidden()
+
+
+def test_show_sky_matte_uses_current_cropped_positive(qapp, monkeypatch):
+    import negpy.desktop.view.sidebar.tone as tone_module
+
+    controller = MagicMock()
+    controller.state = AppState()
+    controller.state.current_file_hash = "sky-frame"
+    config = controller.state.config
+    source = np.full((6, 8, 3), 0.4, dtype=np.float32)
+    controller.state.last_metrics = {
+        "base_positive": source,
+        "content_rect": (2, 1, 4, 3),
+        "render_identity": ("sky-frame", config),
+    }
+    dialog = MagicMock()
+    dialog_factory = MagicMock(return_value=dialog)
+    monkeypatch.setattr(tone_module, "SkyMatteDialog", dialog_factory)
+    sidebar = ToneSidebar(controller)
+
+    sidebar._show_sky_matte()
+
+    passed_image = dialog_factory.call_args.args[0]
+    assert passed_image.shape == (3, 4, 3)
+    np.testing.assert_allclose(passed_image, 0.4, atol=0.002)
+    dialog.show.assert_called_once()
+
+
+def test_sky_matte_dialog_processes_in_background_and_displays_grayscale(qapp, monkeypatch):
+    from PyQt6.QtTest import QTest
+    import negpy.desktop.view.widgets.sky_matte_dialog as dialog_module
+
+    monkeypatch.setattr(dialog_module, "make_sky_matte", lambda image, *_args: np.full(image.shape[:2], 0.75, dtype=np.float32))
+    dialog = dialog_module.SkyMatteDialog(np.full((8, 12, 3), 0.5, dtype=np.float32), lambda: True)
+    dialog.show()
+
+    for _ in range(100):
+        qapp.processEvents()
+        pixmap = dialog.image_label.pixmap()
+        if pixmap is not None and not pixmap.isNull():
+            break
+        QTest.qWait(10)
+
+    assert dialog.image_label.pixmap() is not None and not dialog.image_label.pixmap().isNull()
+    displayed = dialog.image_label.pixmap().toImage()
+    assert (displayed.width(), displayed.height()) == (12, 8)
+    assert displayed.pixelColor(0, 0).red() == 191
+    assert displayed.pixelColor(0, 0).red() == displayed.pixelColor(0, 0).green() == displayed.pixelColor(0, 0).blue()
+    assert dialog.status.text() == "White shows sky coverage. Black shows no coverage."
+    dialog.close()
+    qapp.processEvents()
 
 
 def _metered_sidebar():

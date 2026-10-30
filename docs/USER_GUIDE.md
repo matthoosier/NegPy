@@ -280,7 +280,7 @@ How light or dark the print is, and how much contrast it has.
     *   **Set Targets…**: the brightness and contrast Auto aims for.
     *   **Bake Auto Density/Grade**: keeps this frame's automatic values and turns Auto off for it.
     *   **Hold Black**: when you lighten the shadows, the deepest blacks stay black.
-*   **Test Strip** (`Shift+T`): a grid of versions at different brightness and contrast. Click the one you like. `Esc` closes it.
+*   **Test Strip** (`Shift+T`): a grid of brightness and contrast versions. Click one. `Esc` closes it.
 *   **Shadows Density** / **Highlights Density** (fold under Print Density): darken or lighten only the shadows or the highlights.
 *   **Shadows Grade** / **Highlights Grade** (fold under ISO-R Grade): contrast in the shadows or the highlights only.
 *   **Printing Aids** (fold):
@@ -289,6 +289,7 @@ How light or dark the print is, and how much contrast it has.
     *   **Contrast Mask**: opens up large dark areas and holds back large bright ones, and keeps fine detail. In the darkroom, a printer gets this with a soft, blurred mask placed on the negative. In digital printing, Fujifilm Frontier scanners get a similar effect with HyperTone. Areas far from mid-gray change most, so a low-contrast frame changes little.
     *   **Split Matte**: applies Contrast Mask to one half of the raw scan. The matte follows rotation, alignment and crop.
     *   **Active area**: choose the raw scan's top, bottom, left or right half for the effect.
+    *   **Show Sky Matte**: previews sky coverage without changing the print.
 *   **Global / R / G / B**: R, G or B applies the grades to one color only, for a cast that differs between shadows and highlights.
 
 **White Point** and **Black Point** are on the Roll tab's **Metering** card ([§10.5](#105-metering-negative--positive)).

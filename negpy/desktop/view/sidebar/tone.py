@@ -3,7 +3,10 @@ from dataclasses import replace
 
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
 
+import numpy as np
+
 from negpy.desktop.auto_sliders import shown_values, stored_value
+from negpy.desktop.view.widgets.sky_matte_dialog import SkyMatteDialog
 from negpy.desktop.view.confirm import warn_targets_affect_unbaked
 from negpy.desktop.view.shortcut_registry import tooltip_with_shortcut
 from negpy.desktop.view.sidebar.base import BaseSidebar, SliderPage
@@ -13,6 +16,7 @@ from negpy.desktop.view.styles.templates import (
     field_row,
     gradient_icon,
     hint_label,
+    labeled_action,
     labeled_toggle,
     wrap_tooltip,
 )
@@ -25,7 +29,12 @@ from negpy.desktop.view.widgets.step_combo import StepCombo
 from negpy.features.hdr.models import hdr_active
 from negpy.features.exposure.auto_sliders import NEUTRAL
 from negpy.features.exposure.models import ContrastMaskArea, EXPOSURE_CONSTANTS, TUNABLE_TARGETS, apply_targets
+from negpy.infrastructure.display.color_mgmt import apply_display_transform
+from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
+from negpy.infrastructure.gpu.resources import GPUTexture
+from negpy.kernel.system.logging import get_logger
 
+logger = get_logger(__name__)
 _ISO_R_MIN = float(EXPOSURE_CONSTANTS["iso_r_min"])
 _ISO_R_MAX = float(EXPOSURE_CONSTANTS["iso_r_max"])
 
@@ -185,6 +194,13 @@ class ToneSidebar(BaseSidebar):
         self.contrast_mask_matte_area_row = QWidget()
         self.contrast_mask_matte_area_row.setLayout(field_row(tr("Active area"), self.contrast_mask_matte_area_combo))
         self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
+        self.show_sky_matte_btn = labeled_action(
+            "fa5s.cloud",
+            tr("Show Sky Matte"),
+            tr("Preview an automatically detected sky matte for the current frame."),
+        )
+        self.show_sky_matte_btn.setVisible(conf.contrast_mask_split_matte)
+        self.show_sky_matte_btn.clicked.connect(self._show_sky_matte)
         # Light given to the paper, not the shape of its curve, so it sits with the exposure controls.
         self.preflash_slider = CompactSlider(tr("Preflash"), 0.0, 1.0, conf.preflash)
         self.diffusion_slider = CompactSlider(tr("Diffusion"), 0.0, 1.0, conf.diffusion)
@@ -197,6 +213,7 @@ class ToneSidebar(BaseSidebar):
             self.contrast_mask_slider,
             self.contrast_mask_split_matte_btn,
             self.contrast_mask_matte_area_row,
+            self.show_sky_matte_btn,
         )
         self.layout.addLayout(aids_header)
         self.layout.addWidget(self.aids_fold)
@@ -215,6 +232,7 @@ class ToneSidebar(BaseSidebar):
             self.contrast_mask_slider,
             self.contrast_mask_split_matte_btn,
             self.contrast_mask_matte_area_row,
+            self.show_sky_matte_btn,
             # A diffuser spreads every layer's light alike.
             self.diffusion_slider,
         )
@@ -387,6 +405,7 @@ class ToneSidebar(BaseSidebar):
 
     def _set_split_matte_enabled(self, enabled: bool) -> None:
         self.contrast_mask_matte_area_row.setVisible(enabled)
+        self.show_sky_matte_btn.setVisible(enabled)
         self.update_config_section(
             "exposure",
             render=True,
@@ -394,6 +413,46 @@ class ToneSidebar(BaseSidebar):
             readback_metrics=True,
             contrast_mask_split_matte=enabled,
         )
+
+    def _show_sky_matte(self) -> None:
+        state = self.state
+        frame_hash, config = state.current_file_hash, state.config
+        with state.metrics_lock:
+            metrics = dict(state.last_metrics)
+
+        expected_identity = (frame_hash, config)
+        image = None
+        error = ""
+        if not frame_hash or metrics.get("render_identity") != expected_identity:
+            error = tr("Render the current frame before showing the sky matte.")
+        else:
+            source = metrics.get("base_positive")
+            try:
+                if isinstance(source, GPUTexture):
+                    source = source.readback()
+                if source is not None:
+                    source = np.asarray(source, dtype=np.float32)
+                    content_rect = metrics.get("content_rect")
+                    if content_rect is not None:
+                        x, y, width, height = (int(value) for value in content_rect)
+                        source = source[y : y + height, x : x + width]
+                    image = np.ascontiguousarray(source[:, :, :3]).copy()
+                    image = np.ascontiguousarray(apply_display_transform(image, WORKING_COLOR_SPACE), dtype=np.float32)
+                else:
+                    error = tr("Open a rendered frame before showing the sky matte.")
+            except Exception as exc:
+                logger.exception("Could not prepare sky matte preview")
+                error = tr("Could not prepare the sky matte preview: {error}", error=exc)
+
+        def is_current() -> bool:
+            if state.current_file_hash != frame_hash or state.config != config:
+                return False
+            with state.metrics_lock:
+                return state.last_metrics.get("render_identity") == expected_identity
+
+        dialog = SkyMatteDialog(image, is_current, parent=self.window(), error=error)
+        self.controller.image_updated.connect(dialog.invalidate)
+        dialog.show()
 
     def _sync_driven(self) -> None:
         """Sliders an auto drives show meter + offset, and reset to the meter's own choice."""
@@ -479,6 +538,7 @@ class ToneSidebar(BaseSidebar):
             self.contrast_mask_split_matte_btn.setChecked(conf.contrast_mask_split_matte)
             self.contrast_mask_matte_area_combo.setCurrentIndex(self.contrast_mask_matte_area_combo.findData(conf.contrast_mask_matte_area))
             self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
+            self.show_sky_matte_btn.setVisible(conf.contrast_mask_split_matte)
             self.diffusion_slider.setValue(conf.diffusion)
             self.preflash_slider.setValue(conf.preflash)
             self.hold_black_action.setChecked(conf.hold_black)
