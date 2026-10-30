@@ -134,6 +134,54 @@ def test_make_sky_matte_runs_guided_filter_and_closed_form_alpha():
     assert np.count_nonzero((result > 0.0) & (result < 1.0)) > 0
 
 
+def test_rough_positive_proxy_inverts_and_clamps_normalized_log():
+    normalized_log = np.array(
+        [
+            [[-0.2, 0.0, 0.25], [0.5, 0.75, 1.0], [1.1, 0.4, -0.1]],
+        ],
+        dtype=np.float32,
+    )
+
+    result = sky_matte.rough_positive_proxy(normalized_log)
+
+    np.testing.assert_allclose(result, [[[1.0, 1.0, 0.75], [0.5, 0.25, 0.0], [0.0, 0.6, 1.0]]])
+    assert result.dtype == np.float32
+    assert result.flags.c_contiguous
+
+
+def test_compare_sky_mattes_maps_rough_to_red_and_final_to_green():
+    final = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
+    rough = np.array([[0.25, 0.5, 0.0]], dtype=np.float32)
+
+    result = sky_matte.compare_sky_mattes(final, rough)
+
+    np.testing.assert_allclose(result, [[[0.25, 0.0, 0.0], [0.5, 0.5, 0.0], [0.0, 1.0, 0.0]]])
+
+
+def test_make_sky_matte_comparison_runs_both_inputs_and_builds_overlap(monkeypatch):
+    final = np.full((2, 3, 3), 0.4, dtype=np.float32)
+    normalized = np.full((2, 3, 3), 0.75, dtype=np.float32)
+    observed = []
+
+    def make_matte(image_rgb, *_args):
+        observed.append(image_rgb.copy())
+        alpha = np.zeros(image_rgb.shape[:2], dtype=np.float32)
+        alpha[:, :2] = 0.8 if image_rgb.mean() > 0.3 else 0.6
+        return alpha
+
+    monkeypatch.setattr(sky_matte, "make_sky_matte", make_matte)
+    model = _FakeSkyModel(np.zeros((2, 3), dtype=np.float32))
+    final_matte, rough_matte, comparison = sky_matte.make_sky_matte_comparison(final, normalized, model)
+
+    np.testing.assert_allclose(observed[0], final)
+    np.testing.assert_allclose(observed[1], 0.25)
+    np.testing.assert_allclose(final_matte[:, :2], 0.8)
+    np.testing.assert_allclose(rough_matte[:, :2], 0.6)
+    np.testing.assert_allclose(comparison[:, :2, 0], 0.6)
+    np.testing.assert_allclose(comparison[:, :2, 1], 0.8)
+    np.testing.assert_array_equal(comparison[:, :, 2], 0.0)
+
+
 def test_inference_uses_fixed_model_dimensions_when_declared():
     logits = np.zeros((1, 150, 8, 8), dtype=np.float32)
     session = _FakeSession(logits, input_shape=(1, 3, 512, 512))

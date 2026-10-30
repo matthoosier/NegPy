@@ -307,6 +307,7 @@ class DarkroomEngine:
                     )
                     expanded_matte = expand_mask_plane(matte, current_img.shape[:2], mask_roi)
                     self._mask_matte = None if expanded_matte is None else (matte_key, expanded_matte)
+                    logger.debug(f"contrast_mask_matte_plane() returned matte {expanded_matte.shape[1]}x{expanded_matte.shape[0]}")
                 if self._mask_matte is not None:
                     context.metrics["contrast_mask_matte"] = self._mask_matte[1]
 

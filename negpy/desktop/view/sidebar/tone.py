@@ -421,25 +421,38 @@ class ToneSidebar(BaseSidebar):
             metrics = dict(state.last_metrics)
 
         expected_identity = (frame_hash, config)
-        image = None
+        final_positive = None
+        normalized_log = None
         error = ""
         if not frame_hash or metrics.get("render_identity") != expected_identity:
             error = tr("Render the current frame before showing the sky matte.")
         else:
-            source = metrics.get("base_positive")
+            positive_source = metrics.get("base_positive")
+            normalized_source = metrics.get("normalized_log")
             try:
-                if isinstance(source, GPUTexture):
-                    source = source.readback()
-                if source is not None:
-                    source = np.asarray(source, dtype=np.float32)
+                if isinstance(positive_source, GPUTexture):
+                    positive_source = positive_source.readback()
+                if isinstance(normalized_source, GPUTexture):
+                    normalized_source = normalized_source.readback()
+                if positive_source is not None and normalized_source is not None:
+                    positive_source = np.asarray(positive_source, dtype=np.float32)
+                    normalized_source = np.asarray(normalized_source, dtype=np.float32)
+                    logger.debug(f"Launching Sky Matte Preview on positive source {positive_source.shape[1]}x{positive_source.shape[0]}")
                     content_rect = metrics.get("content_rect")
                     if content_rect is not None:
                         x, y, width, height = (int(value) for value in content_rect)
-                        source = source[y : y + height, x : x + width]
-                    image = np.ascontiguousarray(source[:, :, :3]).copy()
-                    image = np.ascontiguousarray(apply_display_transform(image, WORKING_COLOR_SPACE), dtype=np.float32)
+                        positive_source = positive_source[y : y + height, x : x + width]
+                    active_roi = metrics.get("active_roi")
+                    if active_roi is not None:
+                        y1, y2, x1, x2 = (int(value) for value in active_roi)
+                        normalized_source = normalized_source[y1:y2, x1:x2]
+                    if positive_source.shape[:2] != normalized_source.shape[:2]:
+                        raise ValueError("The rendered positive and normalized negative have different dimensions.")
+                    final_positive = np.ascontiguousarray(positive_source[:, :, :3]).copy()
+                    final_positive = np.ascontiguousarray(apply_display_transform(final_positive, WORKING_COLOR_SPACE), dtype=np.float32)
+                    normalized_log = np.ascontiguousarray(normalized_source[:, :, :3]).copy()
                 else:
-                    error = tr("Open a rendered frame before showing the sky matte.")
+                    error = tr("Render the current frame before showing the sky matte.")
             except Exception as exc:
                 logger.exception("Could not prepare sky matte preview")
                 error = tr("Could not prepare the sky matte preview: {error}", error=exc)
@@ -450,7 +463,7 @@ class ToneSidebar(BaseSidebar):
             with state.metrics_lock:
                 return state.last_metrics.get("render_identity") == expected_identity
 
-        dialog = SkyMatteDialog(image, is_current, parent=self.window(), error=error)
+        dialog = SkyMatteDialog(final_positive, normalized_log, is_current, parent=self.window(), error=error)
         self.controller.image_updated.connect(dialog.invalidate)
         dialog.show()
 

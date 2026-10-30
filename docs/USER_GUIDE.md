@@ -276,7 +276,7 @@ How light or dark the print is, and how much contrast it has.
 
 *   **Print Density**: how light or dark the print is (the darkroom's exposure time). Lower is lighter.
 *   **ISO-R Grade**: contrast (the darkroom's paper grade). A lower number gives more contrast; about 110 is normal.
-*   **Auto** (the wand, also on the Exposure tab's bar): **Auto Density** and **Auto Grade** set brightness and contrast for each frame, so a roll prints evenly. A slider then shows the automatic value: move it to adjust, double-click it to go back. Right-click the wand to turn both on or off. The Auto menu also has:
+*   **Auto** (the wand, also on the Exposure tab's bar): **Auto Density** and **Auto Grade** set even brightness and contrast across a roll. The slider shows the automatic value; drag to adjust and double-click to reset. Right-click the wand to toggle both. The menu also has:
     *   **Set Targets…**: the brightness and contrast Auto aims for.
     *   **Bake Auto Density/Grade**: keeps this frame's automatic values and turns Auto off for it.
     *   **Hold Black**: when you lighten the shadows, the deepest blacks stay black.
@@ -286,10 +286,10 @@ How light or dark the print is, and how much contrast it has.
 *   **Printing Aids** (fold):
     *   **Preflash**: brings back detail in the brightest areas.
     *   **Diffusion**: a soft glow; dark areas spread into bright ones.
-    *   **Contrast Mask**: opens up large dark areas and holds back large bright ones, and keeps fine detail. In the darkroom, a printer gets this with a soft, blurred mask placed on the negative. In digital printing, Fujifilm Frontier scanners get a similar effect with HyperTone. Areas far from mid-gray change most, so a low-contrast frame changes little.
+    *   **Contrast Mask**: opens large dark areas and holds back large bright ones, while keeping fine detail. A blurred negative mask creates this effect in the darkroom. Frontier HyperTone makes a similar digital effect. Low-contrast frames change less.
     *   **Split Matte**: applies Contrast Mask to one half of the raw scan. The matte follows rotation, alignment and crop.
     *   **Active area**: choose the raw scan's top, bottom, left or right half for the effect.
-    *   **Show Sky Matte**: previews sky coverage without changing the print.
+    *   **Show Sky Matte**: shows the print matte in green and the inverted-negative matte in red. The comparison shows overlap in yellow. It does not change the print.
 *   **Global / R / G / B**: R, G or B applies the grades to one color only, for a cast that differs between shadows and highlights.
 
 **White Point** and **Black Point** are on the Roll tab's **Metering** card ([§10.5](#105-metering-negative--positive)).

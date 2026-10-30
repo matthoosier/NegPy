@@ -1070,6 +1070,7 @@ class GPUEngine:
                                 **geometry_kwargs(settings.geometry, k1_eff),
                             ),
                         )
+                        logger.debug(f"contrast_mask_matte_plane() returned matte {self._matte_plane[1].shape[1]}x{self._matte_plane[1].shape[0]}")
                     matte_plane = self._matte_plane[1]
                     matte_key = self._matte_plane[0]
                     matte_rect = frame_rect
@@ -3118,6 +3119,7 @@ class GPUEngine:
                 ),
                 (x1, y1, crop_w, crop_h),
             )
+            logger.debug(f"contrast_mask_matte_plane() returned matte {global_matte[0].shape[1]}x{global_matte[0].shape[0]}")
             self._matte_tex_key = None
         global_diffusion = None
         if settings.exposure.diffusion > 0.0 and render_path(settings.process) is RenderPath.PRINT:

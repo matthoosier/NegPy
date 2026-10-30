@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from PyQt6.QtCore import Qt
 
 from negpy.desktop.session import AppState
 from negpy.desktop.view.sidebar.tone import ToneSidebar
@@ -158,53 +159,82 @@ def test_sky_matte_button_follows_split_matte_toggle(qapp):
     assert sidebar.show_sky_matte_btn.isHidden()
 
 
-def test_show_sky_matte_uses_current_cropped_positive(qapp, monkeypatch):
+def test_show_sky_matte_uses_matching_crops_of_positive_and_normalized_log(qapp, monkeypatch):
     import negpy.desktop.view.sidebar.tone as tone_module
 
     controller = MagicMock()
     controller.state = AppState()
     controller.state.current_file_hash = "sky-frame"
     config = controller.state.config
-    source = np.full((6, 8, 3), 0.4, dtype=np.float32)
+    positive = np.full((6, 8, 3), 0.4, dtype=np.float32)
+    normalized = np.arange(6 * 8 * 3, dtype=np.float32).reshape(6, 8, 3)
     controller.state.last_metrics = {
-        "base_positive": source,
+        "base_positive": positive,
+        "normalized_log": normalized,
         "content_rect": (2, 1, 4, 3),
+        "active_roi": (1, 4, 2, 6),
         "render_identity": ("sky-frame", config),
     }
     dialog = MagicMock()
     dialog_factory = MagicMock(return_value=dialog)
     monkeypatch.setattr(tone_module, "SkyMatteDialog", dialog_factory)
+    monkeypatch.setattr(tone_module, "apply_display_transform", lambda image, *_args: image)
     sidebar = ToneSidebar(controller)
 
     sidebar._show_sky_matte()
 
-    passed_image = dialog_factory.call_args.args[0]
-    assert passed_image.shape == (3, 4, 3)
-    np.testing.assert_allclose(passed_image, 0.4, atol=0.002)
+    passed_positive, passed_normalized = dialog_factory.call_args.args[:2]
+    assert passed_positive.shape == passed_normalized.shape == (3, 4, 3)
+    np.testing.assert_allclose(passed_positive, 0.4)
+    np.testing.assert_array_equal(passed_normalized, normalized[1:4, 2:6])
     dialog.show.assert_called_once()
 
 
-def test_sky_matte_dialog_processes_in_background_and_displays_grayscale(qapp, monkeypatch):
+@pytest.mark.parametrize(
+    ("shape", "orientation"),
+    (((8, 12), Qt.Orientation.Vertical), ((12, 8), Qt.Orientation.Horizontal)),
+)
+def test_sky_matte_dialog_displays_both_mattes_and_rgb_comparison(qapp, monkeypatch, shape, orientation):
     from PyQt6.QtTest import QTest
     import negpy.desktop.view.widgets.sky_matte_dialog as dialog_module
 
-    monkeypatch.setattr(dialog_module, "make_sky_matte", lambda image, *_args: np.full(image.shape[:2], 0.75, dtype=np.float32))
-    dialog = dialog_module.SkyMatteDialog(np.full((8, 12, 3), 0.5, dtype=np.float32), lambda: True)
+    def make_comparison(_positive, normalized, *_args):
+        height, width = normalized.shape[:2]
+        matte_shape = (height // 2, width // 2)
+        final = np.full(matte_shape, 0.75, dtype=np.float32)
+        rough = np.full(matte_shape, 0.25, dtype=np.float32)
+        comparison = np.zeros((*matte_shape, 3), dtype=np.float32)
+        comparison[:, :, 0] = rough
+        comparison[:, :, 1] = final
+        return final, rough, comparison
+
+    monkeypatch.setattr(dialog_module, "make_sky_matte_comparison", make_comparison)
+    dialog = dialog_module.SkyMatteDialog(
+        np.full((*shape, 3), 0.5, dtype=np.float32),
+        np.full((*shape, 3), 0.5, dtype=np.float32),
+        lambda: True,
+    )
     dialog.show()
 
     for _ in range(100):
         qapp.processEvents()
-        pixmap = dialog.image_label.pixmap()
-        if pixmap is not None and not pixmap.isNull():
+        pixmaps = [label.pixmap() for label in dialog.image_labels]
+        if all(pixmap is not None and not pixmap.isNull() for pixmap in pixmaps):
             break
         QTest.qWait(10)
 
-    assert dialog.image_label.pixmap() is not None and not dialog.image_label.pixmap().isNull()
-    displayed = dialog.image_label.pixmap().toImage()
-    assert (displayed.width(), displayed.height()) == (12, 8)
-    assert displayed.pixelColor(0, 0).red() == 191
-    assert displayed.pixelColor(0, 0).red() == displayed.pixelColor(0, 0).green() == displayed.pixelColor(0, 0).blue()
-    assert dialog.status.text() == "White shows sky coverage. Black shows no coverage."
+    assert all(pixmap is not None and not pixmap.isNull() for pixmap in pixmaps)
+    final_pixel = pixmaps[0].toImage().pixelColor(pixmaps[0].width() // 2, pixmaps[0].height() // 2)
+    rough_pixel = pixmaps[1].toImage().pixelColor(pixmaps[1].width() // 2, pixmaps[1].height() // 2)
+    overlap_pixel = pixmaps[2].toImage().pixelColor(pixmaps[2].width() // 2, pixmaps[2].height() // 2)
+    assert final_pixel.red() == 0 and final_pixel.green() == 191 and final_pixel.blue() == 0
+    assert rough_pixel.red() == 64 and rough_pixel.green() == 0 and rough_pixel.blue() == 0
+    assert overlap_pixel.red() == 64 and overlap_pixel.green() == 191 and overlap_pixel.blue() == 0
+    expected_dimensions = f"Input image: {shape[1]} × {shape[0]}\nMatte: {shape[1] // 2} × {shape[0] // 2}"
+    assert dialog.detail_labels[0].text() == expected_dimensions
+    assert dialog.detail_labels[1].text() == expected_dimensions
+    assert dialog._panel_orientation == orientation
+    assert dialog.status.text() == "Green shows final-positive coverage. Red shows rough-positive coverage. Yellow shows overlap."
     dialog.close()
     qapp.processEvents()
 

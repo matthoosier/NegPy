@@ -226,6 +226,42 @@ def make_sky_matte(
     return np.ascontiguousarray(alpha, dtype=np.float32)
 
 
+def rough_positive_proxy(normalized_log: np.ndarray) -> np.ndarray:
+    """Invert the normalized negative into a bounded positive proxy."""
+    if normalized_log.ndim != 3 or normalized_log.shape[2] < 3 or not normalized_log.size:
+        raise SkyMatteError("The normalized negative must be a non-empty RGB frame.")
+    return np.ascontiguousarray(np.clip(1.0 - normalized_log[:, :, :3], 0.0, 1.0), dtype=np.float32)
+
+
+def compare_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> np.ndarray:
+    """Encode rough-positive alpha as red and final-positive alpha as green."""
+    if final_positive.ndim != 2 or rough_positive.ndim != 2 or final_positive.shape != rough_positive.shape:
+        raise SkyMatteError("Sky mattes must be matching grayscale images.")
+    if not np.isfinite(final_positive).all() or not np.isfinite(rough_positive).all():
+        raise SkyMatteError("Sky mattes must contain finite values.")
+    comparison = np.zeros((*final_positive.shape, 3), dtype=np.float32)
+    comparison[:, :, 0] = np.clip(rough_positive, 0.0, 1.0)
+    comparison[:, :, 1] = np.clip(final_positive, 0.0, 1.0)
+    return comparison
+
+
+def make_sky_matte_comparison(
+    final_positive: np.ndarray,
+    normalized_log: np.ndarray,
+    model: SkyMatteModel,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return final-positive matte, rough-positive matte, and their color comparison."""
+    if final_positive.shape[:2] != normalized_log.shape[:2]:
+        raise SkyMatteError("Final-positive and normalized-negative frames must have matching dimensions.")
+    final_matte = make_sky_matte(final_positive, model, is_cancelled, on_progress)
+    if is_cancelled is not None and is_cancelled():
+        raise SkyMatteError("Sky matte processing was canceled.")
+    rough_matte = make_sky_matte(rough_positive_proxy(normalized_log), model, is_cancelled, on_progress)
+    return final_matte, rough_matte, compare_sky_mattes(final_matte, rough_matte)
+
+
 def _make_trimap(probability: np.ndarray) -> np.ndarray:
     """Mark confident sky, uncertain pixels, and definite foreground."""
     if not np.isfinite(probability).all():

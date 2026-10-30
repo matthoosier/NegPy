@@ -9,6 +9,9 @@ from negpy.features.geometry.logic import AUTOCROP_DETECT_RES, _normalize_detect
 from negpy.features.process.models import ProcessMode
 from negpy.kernel.image.logic import percentile_from_sorted
 from negpy.kernel.image.validation import ensure_image
+from negpy.kernel.system.logging import get_logger
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from negpy.features.process.models import ProcessConfig
@@ -570,7 +573,9 @@ def contrast_mask_plane(
 ) -> Tuple[np.ndarray, float]:
     """The zero-mean blurred luma plane the Contrast Mask reads, on `analysis_grid`, plus the val it was
     centred on. `bw_weights` collapses the val first, as a B&W print does the pixel."""
+    logger.debug(f"contrast_mask_plane(): input image is {image.shape[1]}x{image.shape[0]}")
     image = analysis_grid(image, rotation, fine_rotation, flip_horizontal, flip_vertical, distortion_k1, converge_v, converge_h, roi_norm)
+    logger.debug(f"contrast_mask_plane(): analysis grid image is {image.shape[1]}x{image.shape[0]}")
 
     # A frame that never metered normalizes to huge values; no stretch, no mask.
     if luminance_density_range(bounds) < 1e-6:

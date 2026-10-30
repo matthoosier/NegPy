@@ -7,16 +7,53 @@ from typing import Callable, Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QImage, QPixmap
-from PyQt6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtGui import QCloseEvent, QImage, QPixmap, QResizeEvent
+from PyQt6.QtWidgets import (
+    QApplication,
+    QBoxLayout,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from negpy.desktop.view.styles.templates import hint_label, pin_dialog_default
 from negpy.desktop.view.widgets.update_dialog import _own
 from negpy.kernel.system.i18n import tr
 from negpy.kernel.system.logging import get_logger
-from negpy.services.assets.sky_matte import SkyMatteError, SkyMatteModel, make_sky_matte
+from negpy.services.assets.sky_matte import SkyMatteError, SkyMatteModel, make_sky_matte_comparison
 
 logger = get_logger(__name__)
+
+
+class _MatteImageLabel(QLabel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._source: Optional[QImage] = None
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(1, 1)
+
+    def set_image(self, image: QImage) -> None:
+        self._source = image.copy()
+        self._refresh()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if self._source is not None and not self.size().isEmpty():
+            self.setPixmap(
+                QPixmap.fromImage(self._source).scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
 
 
 class SkyMatteWorker(QThread):
@@ -24,9 +61,10 @@ class SkyMatteWorker(QThread):
     ready = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, image: np.ndarray) -> None:
+    def __init__(self, final_positive: np.ndarray, normalized_log: np.ndarray) -> None:
         super().__init__()
-        self._image = image
+        self._final_positive = final_positive
+        self._normalized_log = normalized_log
         self._cancelled = threading.Event()
 
     def cancel(self) -> None:
@@ -34,8 +72,9 @@ class SkyMatteWorker(QThread):
 
     def run(self) -> None:
         try:
-            matte = make_sky_matte(
-                self._image,
+            result = make_sky_matte_comparison(
+                self._final_positive,
+                self._normalized_log,
                 SkyMatteModel(),
                 self._cancelled.is_set,
                 self.progress.emit,
@@ -50,7 +89,7 @@ class SkyMatteWorker(QThread):
                 self.failed.emit(tr("Sky matte failed. See the log for details."))
         else:
             if not self._cancelled.is_set():
-                self.ready.emit(matte)
+                self.ready.emit(result)
 
 
 class SkyMatteDialog(QDialog):
@@ -58,7 +97,8 @@ class SkyMatteDialog(QDialog):
 
     def __init__(
         self,
-        image: Optional[np.ndarray],
+        final_positive: Optional[np.ndarray],
+        normalized_log: Optional[np.ndarray],
         is_current: Callable[[], bool],
         parent: Optional[QWidget] = None,
         error: str = "",
@@ -79,12 +119,31 @@ class SkyMatteDialog(QDialog):
         self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
 
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(1, 1)
+        self.images_widget = QWidget()
+        self.images_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.images_widget)
+        self.images_layout.setContentsMargins(0, 0, 0, 0)
+        self.images_layout.setSpacing(8)
+        self.image_labels: list[_MatteImageLabel] = []
+        self.detail_labels: list[QLabel] = []
+        for index, title in enumerate((tr("Final Positive"), tr("Rough Positive"), tr("Matte Comparison"))):
+            panel = QWidget()
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_title = QLabel(title)
+            panel_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            panel_layout.addWidget(panel_title)
+            details = QLabel()
+            details.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            details.setWordWrap(True)
+            panel_layout.addWidget(details)
+            self.detail_labels.append(details)
+            image_label = _MatteImageLabel()
+            panel_layout.addWidget(image_label, 1)
+            self.images_layout.addWidget(panel, 1)
+            self.image_labels.append(image_label)
         scroll = QScrollArea()
-        scroll.setWidgetResizable(False)
-        scroll.setWidget(self.image_label)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.images_widget)
         layout.addWidget(scroll, 1)
 
         footer = QHBoxLayout()
@@ -97,15 +156,17 @@ class SkyMatteDialog(QDialog):
 
         if error:
             self._set_error(error)
-        elif image is None:
+        elif final_positive is None or normalized_log is None:
             self._set_error(tr("Open a rendered frame before showing the sky matte."))
         else:
-            self._start(image)
+            self._start(final_positive, normalized_log)
 
-    def _start(self, image: np.ndarray) -> None:
-        self.status.setText(tr("Finding the sky…"))
+    def _start(self, final_positive: np.ndarray, normalized_log: np.ndarray) -> None:
+        self._final_positive_shape = final_positive.shape[:2]
+        self._normalized_log_shape = normalized_log.shape[:2]
+        self.status.setText(tr("Comparing sky mattes…"))
         self.progress.setVisible(True)
-        worker = SkyMatteWorker(image)
+        worker = SkyMatteWorker(final_positive, normalized_log)
         self._worker = worker
         worker.progress.connect(self._on_progress)
         worker.ready.connect(self._on_ready)
@@ -122,17 +183,49 @@ class SkyMatteDialog(QDialog):
             self.progress.setRange(0, total)
             self.progress.setValue(done)
 
-    def _on_ready(self, matte: np.ndarray) -> None:
+    def _on_ready(self, result: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
         if not self._is_current():
             self._set_error(tr("The frame changed. Close this window and show the sky matte again."))
             return
-        gray = np.clip(matte * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        h, w = gray.shape
-        image = QImage(gray.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
-        self.image_label.setPixmap(QPixmap.fromImage(image))
-        self.image_label.adjustSize()
+        final_matte, rough_matte, comparison = result
+        height, width = final_matte.shape
+        self._panel_orientation = Qt.Orientation.Horizontal if height > width else Qt.Orientation.Vertical
+        self.images_layout.setDirection(
+            QBoxLayout.Direction.LeftToRight if self._panel_orientation == Qt.Orientation.Horizontal else QBoxLayout.Direction.TopToBottom
+        )
+        final_gray = np.clip(final_matte * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        rough_gray = np.clip(rough_matte * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        comparison_rgb = np.clip(comparison * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        final_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+        final_rgb[:, :, 1] = final_gray
+        rough_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+        rough_rgb[:, :, 0] = rough_gray
+        self.image_labels[0].set_image(QImage(final_rgb.data, width, height, width * 3, QImage.Format.Format_RGB888))
+        self.image_labels[1].set_image(QImage(rough_rgb.data, width, height, width * 3, QImage.Format.Format_RGB888))
+        self.image_labels[2].set_image(QImage(comparison_rgb.data, width, height, width * 3, QImage.Format.Format_RGB888))
+        final_height, final_width = self._final_positive_shape
+        rough_height, rough_width = self._normalized_log_shape
+        self.detail_labels[0].setText(
+            "\n".join(
+                (
+                    tr("Input image: {width} × {height}", width=final_width, height=final_height),
+                    tr("Matte: {width} × {height}", width=width, height=height),
+                )
+            )
+        )
+        self.detail_labels[1].setText(
+            "\n".join(
+                (
+                    tr("Input image: {width} × {height}", width=rough_width, height=rough_height),
+                    tr("Matte: {width} × {height}", width=width, height=height),
+                )
+            )
+        )
+        self.detail_labels[2].setText(
+                tr("Matte: {width} x {height}", width=comparison.shape[1], height=comparison.shape[0])
+        )
         self.progress.setVisible(False)
-        self.status.setText(tr("White shows sky coverage. Black shows no coverage."))
+        self.status.setText(tr("Green shows final-positive coverage. Red shows rough-positive coverage. Yellow shows overlap."))
 
     def _set_error(self, message: str) -> None:
         self.progress.setVisible(False)
