@@ -91,6 +91,22 @@ class TestGpuTiledParity(unittest.TestCase):
         self.assertGreater(diff, 0.01, "Contrast Mask did nothing to the tiled export")
         self._assert_parity(settings, "Tiled export dropped the Contrast Mask")
 
+    def test_tiled_applies_split_matte(self):
+        from negpy.features.exposure.models import ContrastMaskArea
+
+        base = _base()
+        hard = replace(base, exposure=replace(base.exposure, grade=40.0, contrast_mask_strength=1.0))
+        settings = replace(
+            hard,
+            exposure=replace(
+                hard.exposure,
+                contrast_mask_split_matte=True,
+                contrast_mask_matte_area=ContrastMaskArea.LEFT,
+            ),
+        )
+        self.assertGreater(float(np.abs(self._tiled(settings) - self._tiled(hard)).mean()), 1e-4)
+        self._assert_parity(settings, "Tiled export misplaced the Contrast Mask matte", tol=0.001)
+
     def test_tiled_applies_sabattier(self):
         """The Mackie-line blur is the alt stage's one spatial term: the halo must cover it."""
         from negpy.features.altprocess.models import AltProcess

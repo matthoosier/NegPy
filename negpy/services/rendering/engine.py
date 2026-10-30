@@ -20,6 +20,7 @@ from negpy.features.exposure.processor import (
 from negpy.features.exposure.bw_filter import collapse_weights, plane_weights, printed_exposure
 from negpy.features.exposure.logic import expand_mask_plane
 from negpy.features.exposure.normalization import (
+    contrast_mask_matte_plane,
     contrast_mask_plane,
     diffusion_grid,
     diffusion_plane,
@@ -97,6 +98,7 @@ class DarkroomEngine:
         self.config = APP_CONFIG
         self.cache = PipelineCache()
         self._mask_plane: Optional[Tuple[Any, np.ndarray, float]] = None
+        self._mask_matte: Optional[Tuple[Any, np.ndarray]] = None
         self._diffusion_plane: Optional[Tuple[Tuple, np.ndarray]] = None
 
     def _run_stage(
@@ -154,6 +156,7 @@ class DarkroomEngine:
         if not context.cache_stages:
             self.cache.clear()
             self._mask_plane = None
+            self._mask_matte = None
             self._diffusion_plane = None
         pipeline_changed = False
         if self.cache.source_hash != source_hash:
@@ -287,6 +290,25 @@ class DarkroomEngine:
                 context.metrics["contrast_mask_plane"] = self._mask_plane[1]
                 context.metrics["contrast_mask_centre"] = self._mask_plane[2]
                 context.metrics["contrast_mask_roi"] = None
+            if settings.exposure.contrast_mask_split_matte:
+                matte_key = (
+                    source_hash,
+                    calculate_config_hash(base_key),
+                    mask_roi,
+                    current_img.shape[:2],
+                    settings.exposure.contrast_mask_matte_area,
+                )
+                if self._mask_matte is None or self._mask_matte[0] != matte_key:
+                    matte = contrast_mask_matte_plane(
+                        img,
+                        settings.exposure.contrast_mask_matte_area,
+                        roi_norm=normalized_roi(mask_roi, current_img.shape[:2]),
+                        **geometry_kwargs(settings.geometry, distortion_k1),
+                    )
+                    expanded_matte = expand_mask_plane(matte, current_img.shape[:2], mask_roi)
+                    self._mask_matte = None if expanded_matte is None else (matte_key, expanded_matte)
+                if self._mask_matte is not None:
+                    context.metrics["contrast_mask_matte"] = self._mask_matte[1]
 
         timing.lap("contrast mask")
 

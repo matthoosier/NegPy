@@ -329,6 +329,7 @@ class PhotometricProcessor:
             mask_coeffs,
             image.shape[:2],
             context.metrics.get("contrast_mask_roi"),
+            context.metrics.get("contrast_mask_matte"),
         )
         if mask_ev is not None:
             ev_map = mask_ev if ev_map is None else negpy_core.add(ev_map, mask_ev)

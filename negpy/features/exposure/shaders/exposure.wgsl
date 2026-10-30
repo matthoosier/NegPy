@@ -68,7 +68,7 @@ struct ExposureUniforms {
     diff_range: vec4<f32>,
     // Print-stock LUT: xyz = e_max per dye (0 = no LUT), w = the black luminance BPC maps to 0.
     lut: vec4<f32>,
-    // B&W collapse weights on the normalized log channels (collapse_weights); w is a pad.
+    // B&W collapse weights on the normalized log channels; w enables Contrast Mask matte coverage.
     bw: vec4<f32>,
 };
 
@@ -84,6 +84,7 @@ struct ExposureUniforms {
 @group(0) @binding(5) var key_tex: texture_2d<f32>;
 // The stock's LUT unrolled to 2D: node (i, j, k) at texel (i + N*j, k). A 1x1 dummy without one.
 @group(0) @binding(6) var lut_tex: texture_2d<f32>;
+@group(0) @binding(7) var matte_tex: texture_2d<f32>;
 
 fn lut_node(i: i32, j: i32, k: i32, n: i32) -> vec3<f32> {
     return textureLoad(lut_tex, vec2<i32>(i + n * j, k), 0).xyz;
@@ -139,12 +140,29 @@ fn plane_sample(coords: vec2<i32>) -> vec4<f32> {
     return mix(top, bot, f.y);
 }
 
+fn matte_sample(coords: vec2<i32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(matte_tex));
+    let p = (vec2<f32>(coords) + vec2<f32>(0.5) - params.mask.yz) * dims / params.mask_span.xy - vec2<f32>(0.5);
+    let lo = clamp(floor(p), vec2<f32>(0.0), dims - vec2<f32>(1.0));
+    let hi = clamp(lo + vec2<f32>(1.0), vec2<f32>(0.0), dims - vec2<f32>(1.0));
+    let f = clamp(p - lo, vec2<f32>(0.0), vec2<f32>(1.0));
+    let i0 = vec2<i32>(lo);
+    let i1 = vec2<i32>(hi);
+    let top = mix(textureLoad(matte_tex, vec2<i32>(i0.x, i0.y), 0).r, textureLoad(matte_tex, vec2<i32>(i1.x, i0.y), 0).r, f.x);
+    let bot = mix(textureLoad(matte_tex, vec2<i32>(i0.x, i1.y), 0).r, textureLoad(matte_tex, vec2<i32>(i1.x, i1.y), 0).r, f.x);
+    return mix(top, bot, f.y);
+}
+
 // The Contrast Mask at this pixel, in stops. Mirrors contrast_mask_stops in negpy_core.
 fn contrast_mask_stops(coords: vec2<i32>) -> f32 {
     let k = params.mask_tone;
     let d = clamp(k.x * plane_sample(coords).r + k.y, params.mask_span.z, params.mask_span.w);
     let t = select(-k.w * d * d, k.z * d * d, d < 0.0);
-    return clamp(t, -params.mask.x, params.mask.x);
+    var stops = clamp(t, -params.mask.x, params.mask.x);
+    if (params.bw.w != 0.0) {
+        stops = stops * matte_sample(coords);
+    }
+    return stops;
 }
 
 fn fast_sigmoid(x: f32) -> f32 {

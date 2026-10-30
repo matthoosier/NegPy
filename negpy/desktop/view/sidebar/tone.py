@@ -1,21 +1,30 @@
 from negpy.kernel.system.i18n import tr
 from dataclasses import replace
 
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
 
 from negpy.desktop.auto_sliders import shown_values, stored_value
 from negpy.desktop.view.confirm import warn_targets_affect_unbaked
 from negpy.desktop.view.shortcut_registry import tooltip_with_shortcut
 from negpy.desktop.view.sidebar.base import BaseSidebar, SliderPage
-from negpy.desktop.view.styles.templates import ICON_BUTTON_WIDTH, TEST_STRIP_SWEEP, gradient_icon, hint_label, wrap_tooltip
+from negpy.desktop.view.styles.templates import (
+    ICON_BUTTON_WIDTH,
+    TEST_STRIP_SWEEP,
+    field_row,
+    gradient_icon,
+    hint_label,
+    labeled_toggle,
+    wrap_tooltip,
+)
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.segmented_choice import SegmentedChoice, ToggleMenuButton
 from negpy.desktop.view.widgets.collapsible import hidden_by_gating
 from negpy.desktop.view.widgets.fold import group_fold, rail_fold
 from negpy.desktop.view.widgets.sliders import CompactSlider
+from negpy.desktop.view.widgets.step_combo import StepCombo
 from negpy.features.hdr.models import hdr_active
 from negpy.features.exposure.auto_sliders import NEUTRAL
-from negpy.features.exposure.models import EXPOSURE_CONSTANTS, TUNABLE_TARGETS, apply_targets
+from negpy.features.exposure.models import ContrastMaskArea, EXPOSURE_CONSTANTS, TUNABLE_TARGETS, apply_targets
 
 _ISO_R_MIN = float(EXPOSURE_CONSTANTS["iso_r_min"])
 _ISO_R_MAX = float(EXPOSURE_CONSTANTS["iso_r_max"])
@@ -162,12 +171,32 @@ class ToneSidebar(BaseSidebar):
                 "Contrast Mask: a soft darkroom mask that opens up large dark areas and holds back large bright ones, modeled on the Fujifilm Frontier's digital interpretation."
             )
         )
+        self.contrast_mask_split_matte_btn = labeled_toggle(
+            "fa5s.columns",
+            tr("Split Matte"),
+            conf.contrast_mask_split_matte,
+            tr("Limit the Contrast Mask effect to one raw scan half, transformed with the frame."),
+        )
+        self.contrast_mask_matte_area_combo = StepCombo.of(
+            [tr("Top"), tr("Bottom"), tr("Left"), tr("Right")],
+            tr("Choose which half of the raw scan receives the Contrast Mask effect."),
+            list(ContrastMaskArea),
+        )
+        self.contrast_mask_matte_area_row = QWidget()
+        self.contrast_mask_matte_area_row.setLayout(field_row(tr("Active area"), self.contrast_mask_matte_area_combo))
+        self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
         # Light given to the paper, not the shape of its curve, so it sits with the exposure controls.
         self.preflash_slider = CompactSlider(tr("Preflash"), 0.0, 1.0, conf.preflash)
         self.diffusion_slider = CompactSlider(tr("Diffusion"), 0.0, 1.0, conf.diffusion)
         self.diffusion_slider.setToolTip(tr("Diffusion: a soft glow that spreads dark areas into bright ones and softens edges, off at 0."))
         aids_header, self.aids_fold = group_fold(
-            "tone_aids", tr("Printing Aids"), self.preflash_slider, self.diffusion_slider, self.contrast_mask_slider
+            "tone_aids",
+            tr("Printing Aids"),
+            self.preflash_slider,
+            self.diffusion_slider,
+            self.contrast_mask_slider,
+            self.contrast_mask_split_matte_btn,
+            self.contrast_mask_matte_area_row,
         )
         self.layout.addLayout(aids_header)
         self.layout.addWidget(self.aids_fold)
@@ -184,6 +213,8 @@ class ToneSidebar(BaseSidebar):
             # A pan masking film is neutral: the mask is one plane subtracted as equal
             # density from every layer, so it has no per-channel form to trim.
             self.contrast_mask_slider,
+            self.contrast_mask_split_matte_btn,
+            self.contrast_mask_matte_area_row,
             # A diffuser spreads every layer's light alike.
             self.diffusion_slider,
         )
@@ -290,6 +321,17 @@ class ToneSidebar(BaseSidebar):
             slider.dragStarted.connect(lambda f=field: self.controller.tone_drag_changed.emit(f))
             slider.dragEnded.connect(lambda: self.controller.tone_drag_changed.emit(""))
 
+        self.contrast_mask_split_matte_btn.toggled.connect(lambda checked: self._set_split_matte_enabled(checked))
+        self.contrast_mask_matte_area_combo.currentIndexChanged.connect(
+            lambda index: self.update_config_section(
+                "exposure",
+                render=True,
+                persist=True,
+                readback_metrics=True,
+                contrast_mask_matte_area=self.contrast_mask_matte_area_combo.itemData(index),
+            )
+        )
+
         # Split grade retargets to the selected channel's trim field at emit time.
         for slider, base in (
             (self.shadow_grade_slider, "shadow_grade"),
@@ -342,6 +384,16 @@ class ToneSidebar(BaseSidebar):
 
     def _meters(self) -> dict:
         return self.state.auto_meters.get(self.state.current_file_hash or "", {})
+
+    def _set_split_matte_enabled(self, enabled: bool) -> None:
+        self.contrast_mask_matte_area_row.setVisible(enabled)
+        self.update_config_section(
+            "exposure",
+            render=True,
+            persist=True,
+            readback_metrics=True,
+            contrast_mask_split_matte=enabled,
+        )
 
     def _sync_driven(self) -> None:
         """Sliders an auto drives show meter + offset, and reset to the meter's own choice."""
@@ -424,6 +476,9 @@ class ToneSidebar(BaseSidebar):
                 self.ch_btn.set_edited(i, any(getattr(conf, f) != 0.0 for f in fields))
             self._sync_driven()
             self.contrast_mask_slider.setValue(conf.contrast_mask_strength)
+            self.contrast_mask_split_matte_btn.setChecked(conf.contrast_mask_split_matte)
+            self.contrast_mask_matte_area_combo.setCurrentIndex(self.contrast_mask_matte_area_combo.findData(conf.contrast_mask_matte_area))
+            self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
             self.diffusion_slider.setValue(conf.diffusion)
             self.preflash_slider.setValue(conf.preflash)
             self.hold_black_action.setChecked(conf.hold_black)
@@ -445,6 +500,8 @@ class ToneSidebar(BaseSidebar):
             self.shadow_grade_slider,
             self.highlight_grade_slider,
             self.contrast_mask_slider,
+            self.contrast_mask_split_matte_btn,
+            self.contrast_mask_matte_area_combo,
             self.diffusion_slider,
             self.preflash_slider,
             self.hold_black_action,

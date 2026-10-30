@@ -584,6 +584,34 @@ def contrast_mask_plane(
     return plane, float(centre)
 
 
+def contrast_mask_matte_plane(
+    image: ImageBuffer,
+    area: str,
+    rotation: int = 0,
+    fine_rotation: float = 0.0,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+    distortion_k1: float = 0.0,
+    converge_v: float = 0.0,
+    converge_h: float = 0.0,
+    roi_norm: Optional[Tuple[float, float, float, float]] = None,
+) -> np.ndarray:
+    """Coverage for one raw-scan half, transformed and cropped on the analysis grid."""
+    h, w = image.shape[:2]
+    matte = np.zeros((h, w), dtype=np.float32)
+    if area == "top":
+        matte[: h // 2, :] = 1.0
+    elif area == "bottom":
+        matte[h // 2 :, :] = 1.0
+    elif area == "left":
+        matte[:, : w // 2] = 1.0
+    elif area == "right":
+        matte[:, w // 2 :] = 1.0
+    else:
+        raise ValueError(f"Unknown Contrast Mask matte area: {area}")
+    return analysis_grid(matte, rotation, fine_rotation, flip_horizontal, flip_vertical, distortion_k1, converge_v, converge_h, roi_norm)
+
+
 def diffusion_grid(
     image: ImageBuffer,
     unmix: Optional[np.ndarray],

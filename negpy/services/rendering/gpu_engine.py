@@ -25,6 +25,7 @@ from negpy.features.exposure.normalization import (
     LogNegativeBounds,
     analyze_log_exposure_bounds_from_log,
     blend_neutral_axis,
+    contrast_mask_matte_plane,
     contrast_mask_plane,
     diffusion_grid,
     diffusion_plane,
@@ -443,10 +444,12 @@ class GPUEngine:
         # (key, maps): mask raster, keyed without grade; grade only rescales plane 1 at upload.
         self._local_maps_cache: Optional[Tuple[Tuple, Optional[np.ndarray]]] = None
         self._mask_plane: Optional[Tuple[Tuple, np.ndarray, float]] = None
+        self._matte_plane: Optional[Tuple[Tuple, np.ndarray]] = None
         self._diffusion_grid: Optional[Tuple[Tuple, np.ndarray]] = None
         self._diffusion_plane: Optional[Tuple[Tuple, Optional[np.ndarray]]] = None
         # Identity of the plane currently sitting in the contrast_mask texture.
         self._mask_tex_key: Optional[Tuple] = None
+        self._matte_tex_key: Optional[Tuple] = None
 
     def _detect_invalidated_stage(
         self, settings: WorkspaceConfig, scale_factor: float, render_size_ref: Optional[float] = None, full_frame: bool = False
@@ -543,6 +546,8 @@ class GPUEngine:
             self._chroma_state_key = None
         if "contrast_mask" in labels:
             self._mask_tex_key = None
+        if "contrast_matte" in labels:
+            self._matte_tex_key = None
         # Bind groups keyed by id() never match a destroyed view again; drop, don't leak.
         self._bind_group_cache.clear()
 
@@ -576,6 +581,7 @@ class GPUEngine:
         self._last_settings = None
         self._local_ev_key = None
         self._mask_tex_key = None
+        self._matte_tex_key = None
         self._sharpen_state_key = None
         self._chroma_state_key = None
 
@@ -684,6 +690,7 @@ class GPUEngine:
         cam_xyz: Optional[list] = None,
         camera_wb: Optional[list] = None,
         contrast_mask_override: Optional[Tuple[np.ndarray, float, Tuple[int, int, int, int]]] = None,
+        contrast_matte_override: Optional[Tuple[np.ndarray, Tuple[int, int, int, int]]] = None,
         film_base: Optional[tuple] = None,
         source_base_log: Any = NOT_READ,
         sabattier_sigma_override: Optional[float] = None,
@@ -701,6 +708,8 @@ class GPUEngine:
 
         ``contrast_mask_override`` is (plane, centre, printed frame in rotated pixels),
         built once per tiled export because a tile cannot see the pre-geometry source.
+        ``contrast_matte_override`` is (coverage, printed frame in rotated pixels), built
+        from the full source for tiled export.
         """
         if not self.gpu.is_available:
             raise RuntimeError("GPU not available")
@@ -984,6 +993,7 @@ class GPUEngine:
         mask_plane = None
         mask_centre = 0.5
         mask_key = None
+        matte_key = None
         # The printed frame in rotated pixels; the shader maps a plane onto it and clamps
         # outside, which is expand_mask_plane's edge padding.
         y1_f, y2_f, x1_f, x2_f = roi if roi is not None else (0, h_rot, 0, w_rot)
@@ -991,6 +1001,8 @@ class GPUEngine:
         y2_f, x2_f = min(h_rot, y2_f), min(w_rot, x2_f)
         frame_rect = (x1_f, y1_f, x2_f - x1_f, y2_f - y1_f)
         mask_rect = None
+        matte_plane = None
+        matte_rect = None
         if settings.exposure.contrast_mask_strength > 0.0 and render_path(settings.process) is RenderPath.PRINT:
             if tiling_mode:
                 # A tile holds no pre-geometry source, so the caller builds the plane once
@@ -999,15 +1011,30 @@ class GPUEngine:
                     mask_plane, mask_centre, frame = contrast_mask_override
                     mask_key = ("tiled",)
                     mask_rect = (frame[0] - global_offset[0], frame[1] - global_offset[1], frame[2], frame[3])
+                if settings.exposure.contrast_mask_split_matte and contrast_matte_override is not None:
+                    matte_plane, frame = contrast_matte_override
+                    matte_key = ("tiled", settings.exposure.contrast_mask_matte_area)
+                    matte_rect = (frame[0] - global_offset[0], frame[1] - global_offset[1], frame[2], frame[3])
+                elif settings.exposure.contrast_mask_split_matte:
+                    raise RuntimeError("Tiled Contrast Mask matte is missing its full-frame coverage plane")
             else:
                 geo = settings.geometry
                 bw_weights = plane_weights(settings.process, settings.exposure)
+                geometry_key = (
+                    geo.rotation,
+                    geo.fine_rotation,
+                    geo.flip_horizontal,
+                    geo.flip_vertical,
+                    geo.converge_v,
+                    geo.converge_h,
+                    k1_eff,
+                )
                 mask_key = (
                     analysis_key,
                     bounds,
                     roi,
                     (h_rot, w_rot),
-                    (geo.rotation, geo.fine_rotation, geo.flip_horizontal, geo.flip_vertical, geo.converge_v, geo.converge_h, k1_eff),
+                    geometry_key,
                     bw_weights,
                 )
                 if self._mask_plane is None or self._mask_plane[0] != mask_key:
@@ -1025,6 +1052,27 @@ class GPUEngine:
                 mask_plane = self._mask_plane[1]
                 mask_centre = self._mask_plane[2]
                 mask_rect = frame_rect
+                if settings.exposure.contrast_mask_split_matte:
+                    matte_key = (
+                        analysis_key,
+                        roi,
+                        (h_rot, w_rot),
+                        geometry_key,
+                        settings.exposure.contrast_mask_matte_area,
+                    )
+                    if self._matte_plane is None or self._matte_plane[0] != matte_key:
+                        self._matte_plane = (
+                            matte_key,
+                            contrast_mask_matte_plane(
+                                img,
+                                settings.exposure.contrast_mask_matte_area,
+                                roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                                **geometry_kwargs(settings.geometry, k1_eff),
+                            ),
+                        )
+                    matte_plane = self._matte_plane[1]
+                    matte_key = self._matte_plane[0]
+                    matte_rect = frame_rect
 
         mask_uniform = None
         if mask_plane is not None and mask_rect is not None:
@@ -1038,6 +1086,8 @@ class GPUEngine:
                     float(mask_rect[2]),
                     float(mask_rect[3]),
                 )
+        if matte_rect is not None and (matte_rect[2] < 1 or matte_rect[3] < 1):
+            matte_plane = None
 
         # The Diffusion plane shares the mask texture (gba) and rect. It is built in the print's own
         # normalization, trims included, so the shader mixes it as light. Print path only.
@@ -1086,6 +1136,7 @@ class GPUEngine:
                 diff_plane = None
         plane_rect = mask_rect if mask_plane is not None else diff_rect
         plane_tex_key = (mask_key if mask_plane is not None else None, diff_key if diff_plane is not None else None)
+        matte_tex_key = matte_key if matte_plane is not None else None
 
         timing.lap("meter/mask planes")
 
@@ -1191,6 +1242,25 @@ class GPUEngine:
                 1,
                 wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
                 "contrast_mask",
+            )
+        if matte_plane is not None:
+            matte_tex = self._get_intermediate_texture(
+                matte_plane.shape[1],
+                matte_plane.shape[0],
+                wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+                "contrast_matte",
+            )
+            if self._matte_tex_key != matte_tex_key:
+                packed_matte = np.zeros((*matte_plane.shape, 4), dtype=np.float32)
+                packed_matte[:, :, 0] = matte_plane
+                matte_tex.upload(packed_matte)
+                self._matte_tex_key = matte_tex_key
+        else:
+            matte_tex = self._get_intermediate_texture(
+                1,
+                1,
+                wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_DST,
+                "contrast_matte",
             )
         # The dodge/burn EV map feeds the exposure pass. A zero-initialized 1x1 dummy keeps
         # the bind group valid when no masks are active (ev_scale.w gates it).
@@ -1325,6 +1395,7 @@ class GPUEngine:
                         (4, tex_mask.view),
                         (5, tex_local_key.view),
                         (6, self._lut_texture(self._exposure_lut).view),
+                        (7, matte_tex.view),
                     ],
                     w_rot,
                     h_rot,
@@ -2275,7 +2346,11 @@ class GPUEngine:
             + struct.pack("ffff", *channel_density_ranges(LogNegativeBounds(adj_floors, adj_ceils)), black_hold_taper(exp, paper))
             # Print-stock LUT: xyz = e_max (0 = no LUT), w = the black that BPC maps to 0.
             + struct.pack("ffff", *lut_row)
-            + struct.pack("ffff", *collapse_weights(settings.process, exp), 0.0)
+            + struct.pack(
+                "ffff",
+                *collapse_weights(settings.process, exp),
+                1.0 if settings.exposure.contrast_mask_split_matte else 0.0,
+            )
         )
 
         cls = float(settings.lab.clahe_strength)
@@ -3028,6 +3103,22 @@ class GPUEngine:
             )
             # One plane serves every tile; the first upload wins.
             self._mask_tex_key = None
+        global_matte = None
+        if (
+            settings.exposure.contrast_mask_strength > 0.0
+            and settings.exposure.contrast_mask_split_matte
+            and render_path(settings.process) is RenderPath.PRINT
+        ):
+            global_matte = (
+                contrast_mask_matte_plane(
+                    img,
+                    settings.exposure.contrast_mask_matte_area,
+                    roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                    **geometry_kwargs(settings.geometry, k1_eff),
+                ),
+                (x1, y1, crop_w, crop_h),
+            )
+            self._matte_tex_key = None
         global_diffusion = None
         if settings.exposure.diffusion > 0.0 and render_path(settings.process) is RenderPath.PRINT:
             wp3, bp3 = per_channel_point_offsets(settings.process)
@@ -3126,6 +3217,7 @@ class GPUEngine:
                         cam_xyz=cam_xyz,
                         camera_wb=camera_wb,
                         contrast_mask_override=global_mask,
+                        contrast_matte_override=global_matte,
                         sabattier_sigma_override=sabattier_sigma,
                         diffusion_override=global_diffusion,
                     )

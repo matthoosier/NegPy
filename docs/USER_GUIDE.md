@@ -287,6 +287,8 @@ How light or dark the print is, and how much contrast it has.
     *   **Preflash**: brings back detail in the brightest areas.
     *   **Diffusion**: a soft glow; dark areas spread into bright ones.
     *   **Contrast Mask**: opens up large dark areas and holds back large bright ones, and keeps fine detail. In the darkroom, a printer gets this with a soft, blurred mask placed on the negative. In digital printing, Fujifilm Frontier scanners get a similar effect with HyperTone. Areas far from mid-gray change most, so a low-contrast frame changes little.
+    *   **Split Matte**: applies Contrast Mask to one half of the raw scan. The matte follows rotation, alignment and crop.
+    *   **Active area**: choose the raw scan's top, bottom, left or right half for the effect.
 *   **Global / R / G / B**: R, G or B applies the grades to one color only, for a cast that differs between shadows and highlights.
 
 **White Point** and **Black Point** are on the Roll tab's **Metering** card ([§10.5](#105-metering-negative--positive)).

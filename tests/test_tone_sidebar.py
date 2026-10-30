@@ -5,6 +5,7 @@ import pytest
 
 from negpy.desktop.session import AppState
 from negpy.desktop.view.sidebar.tone import ToneSidebar
+from negpy.features.exposure.models import ContrastMaskArea
 from negpy.features.process.models import ProcessMode
 
 
@@ -117,7 +118,6 @@ def test_hold_black_rides_the_auto_menu_without_lighting_it(qapp):
     assert sidebar.hold_black_action in sidebar.auto_btn.choice_menu.actions()
     assert sidebar.hold_black_action.isChecked()
     assert not sidebar.auto_btn.isChecked()
-
     sidebar.update_config_section = MagicMock()
     sidebar.hold_black_action.trigger()
     assert sidebar.update_config_section.call_args.kwargs["hold_black"] is False
@@ -127,6 +127,22 @@ def test_hold_black_rides_the_auto_menu_without_lighting_it(qapp):
     )
     sidebar.sync_ui()
     assert not sidebar.hold_black_action.isVisible()
+
+
+def test_split_matte_toggle_and_active_area_update_config(qapp):
+    controller = MagicMock()
+    controller.state = AppState()
+    sidebar = ToneSidebar(controller)
+
+    assert sidebar.contrast_mask_matte_area_combo.currentData() == ContrastMaskArea.TOP
+    assert sidebar.contrast_mask_matte_area_row.isHidden()
+
+    sidebar.contrast_mask_split_matte_btn.setChecked(True)
+    assert not sidebar.contrast_mask_matte_area_row.isHidden()
+    assert controller.apply_config.call_args.args[0].exposure.contrast_mask_split_matte
+
+    sidebar.contrast_mask_matte_area_combo.setCurrentIndex(sidebar.contrast_mask_matte_area_combo.findData(ContrastMaskArea.RIGHT))
+    assert controller.apply_config.call_args.args[0].exposure.contrast_mask_matte_area == ContrastMaskArea.RIGHT
 
 
 def _metered_sidebar():

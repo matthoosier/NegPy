@@ -1308,12 +1308,21 @@ def contrast_mask_ev(
     coeffs: Optional[Tuple[float, ...]],
     out_shape: Tuple[int, int],
     roi: Optional[Tuple[int, int, int, int]] = None,
+    coverage: Optional[np.ndarray] = None,
 ) -> Optional[np.ndarray]:
     """The contrast mask as print-exposure stops, ready to add to the dodge/burn map."""
     if plane is None or coeffs is None:
         return None
     expanded = _expanded(plane, out_shape, roi, 1.0)
-    return None if expanded is None else negpy_core.contrast_mask_stops(expanded, tuple(float(k) for k in coeffs))
+    if expanded is None:
+        return None
+    stops = negpy_core.contrast_mask_stops(expanded, tuple(float(k) for k in coeffs))
+    if coverage is not None:
+        expanded_coverage = _expanded(coverage, out_shape, roi, 1.0)
+        if expanded_coverage is None:
+            return None
+        stops = negpy_core.multiply(stops, expanded_coverage)
+    return stops
 
 
 def cmy_to_density(val: float, log_range: float = 1.0) -> float:
