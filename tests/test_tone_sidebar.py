@@ -159,7 +159,7 @@ def test_sky_matte_button_follows_split_matte_toggle(qapp):
     assert sidebar.show_sky_matte_btn.isHidden()
 
 
-def test_show_sky_matte_uses_matching_crops_of_positive_and_normalized_log(qapp, monkeypatch):
+def test_show_sky_matte_keeps_different_source_sizes_after_cropping(qapp, monkeypatch):
     import negpy.desktop.view.sidebar.tone as tone_module
 
     controller = MagicMock()
@@ -172,7 +172,7 @@ def test_show_sky_matte_uses_matching_crops_of_positive_and_normalized_log(qapp,
         "base_positive": positive,
         "normalized_log": normalized,
         "content_rect": (2, 1, 4, 3),
-        "active_roi": (1, 4, 2, 6),
+        "active_roi": (0, 5, 0, 7),
         "render_identity": ("sky-frame", config),
     }
     dialog = MagicMock()
@@ -184,9 +184,10 @@ def test_show_sky_matte_uses_matching_crops_of_positive_and_normalized_log(qapp,
     sidebar._show_sky_matte()
 
     passed_positive, passed_normalized = dialog_factory.call_args.args[:2]
-    assert passed_positive.shape == passed_normalized.shape == (3, 4, 3)
+    assert passed_positive.shape == (3, 4, 3)
+    assert passed_normalized.shape == (5, 7, 3)
     np.testing.assert_allclose(passed_positive, 0.4)
-    np.testing.assert_array_equal(passed_normalized, normalized[1:4, 2:6])
+    np.testing.assert_array_equal(passed_normalized, normalized[:5, :7])
     dialog.show.assert_called_once()
 
 

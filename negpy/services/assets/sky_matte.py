@@ -233,12 +233,34 @@ def rough_positive_proxy(normalized_log: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.clip(1.0 - normalized_log[:, :, :3], 0.0, 1.0), dtype=np.float32)
 
 
-def compare_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> np.ndarray:
-    """Encode rough-positive alpha as red and final-positive alpha as green."""
-    if final_positive.ndim != 2 or rough_positive.ndim != 2 or final_positive.shape != rough_positive.shape:
-        raise SkyMatteError("Sky mattes must be matching grayscale images.")
+def _harmonize_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if final_positive.ndim != 2 or rough_positive.ndim != 2:
+        raise SkyMatteError("Sky mattes must be grayscale images.")
     if not np.isfinite(final_positive).all() or not np.isfinite(rough_positive).all():
         raise SkyMatteError("Sky mattes must contain finite values.")
+    if final_positive.shape == rough_positive.shape:
+        return final_positive, rough_positive
+    if final_positive.size < rough_positive.size:
+        final_positive = cv2.resize(
+            final_positive,
+            (rough_positive.shape[1], rough_positive.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    else:
+        rough_positive = cv2.resize(
+            rough_positive,
+            (final_positive.shape[1], final_positive.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    return (
+        np.ascontiguousarray(final_positive, dtype=np.float32),
+        np.ascontiguousarray(rough_positive, dtype=np.float32),
+    )
+
+
+def compare_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> np.ndarray:
+    """Encode rough-positive alpha as red and final-positive alpha as green."""
+    final_positive, rough_positive = _harmonize_sky_mattes(final_positive, rough_positive)
     comparison = np.zeros((*final_positive.shape, 3), dtype=np.float32)
     comparison[:, :, 0] = np.clip(rough_positive, 0.0, 1.0)
     comparison[:, :, 1] = np.clip(final_positive, 0.0, 1.0)
@@ -253,12 +275,11 @@ def make_sky_matte_comparison(
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return final-positive matte, rough-positive matte, and their color comparison."""
-    if final_positive.shape[:2] != normalized_log.shape[:2]:
-        raise SkyMatteError("Final-positive and normalized-negative frames must have matching dimensions.")
     final_matte = make_sky_matte(final_positive, model, is_cancelled, on_progress)
     if is_cancelled is not None and is_cancelled():
         raise SkyMatteError("Sky matte processing was canceled.")
     rough_matte = make_sky_matte(rough_positive_proxy(normalized_log), model, is_cancelled, on_progress)
+    final_matte, rough_matte = _harmonize_sky_mattes(final_matte, rough_matte)
     return final_matte, rough_matte, compare_sky_mattes(final_matte, rough_matte)
 
 

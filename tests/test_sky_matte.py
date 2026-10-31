@@ -158,6 +158,29 @@ def test_compare_sky_mattes_maps_rough_to_red_and_final_to_green():
     np.testing.assert_allclose(result, [[[0.25, 0.0, 0.0], [0.5, 0.5, 0.0], [0.0, 1.0, 0.0]]])
 
 
+def test_compare_sky_mattes_upsamples_the_smaller_matte():
+    final = np.array([[0.0, 1.0]], dtype=np.float32)
+    rough = np.array([[0.0, 0.5, 1.0], [0.0, 0.5, 1.0]], dtype=np.float32)
+
+    result = sky_matte.compare_sky_mattes(final, rough)
+
+    expected_final = cv2.resize(final, (3, 2), interpolation=cv2.INTER_LINEAR)
+    np.testing.assert_allclose(result[:, :, 1], expected_final)
+    np.testing.assert_array_equal(result[:, :, 0], rough)
+    np.testing.assert_array_equal(result[:, :, 2], 0.0)
+
+
+def test_compare_sky_mattes_upsamples_rough_matte_to_final_resolution():
+    final = np.tile(np.array([[0.0, 0.5, 1.0]], dtype=np.float32), (2, 1))
+    rough = np.array([[0.0, 1.0]], dtype=np.float32)
+
+    result = sky_matte.compare_sky_mattes(final, rough)
+
+    expected_rough = cv2.resize(rough, (3, 2), interpolation=cv2.INTER_LINEAR)
+    np.testing.assert_array_equal(result[:, :, 0], expected_rough)
+    np.testing.assert_array_equal(result[:, :, 1], final)
+
+
 def test_make_sky_matte_comparison_runs_both_inputs_and_builds_overlap(monkeypatch):
     final = np.full((2, 3, 3), 0.4, dtype=np.float32)
     normalized = np.full((2, 3, 3), 0.75, dtype=np.float32)
@@ -179,6 +202,26 @@ def test_make_sky_matte_comparison_runs_both_inputs_and_builds_overlap(monkeypat
     np.testing.assert_allclose(rough_matte[:, :2], 0.6)
     np.testing.assert_allclose(comparison[:, :2, 0], 0.6)
     np.testing.assert_allclose(comparison[:, :2, 1], 0.8)
+    np.testing.assert_array_equal(comparison[:, :, 2], 0.0)
+
+
+def test_make_sky_matte_comparison_accepts_different_source_sizes(monkeypatch):
+    final = np.full((2, 3, 3), 0.4, dtype=np.float32)
+    normalized = np.full((4, 6, 3), 0.75, dtype=np.float32)
+
+    def make_matte(image_rgb, *_args):
+        return np.full(image_rgb.shape[:2], image_rgb.mean(), dtype=np.float32)
+
+    monkeypatch.setattr(sky_matte, "make_sky_matte", make_matte)
+    model = _FakeSkyModel(np.zeros((2, 3), dtype=np.float32))
+
+    final_matte, rough_matte, comparison = sky_matte.make_sky_matte_comparison(final, normalized, model)
+
+    assert final_matte.shape == rough_matte.shape == comparison.shape[:2] == (4, 6)
+    np.testing.assert_allclose(final_matte, 0.4)
+    np.testing.assert_allclose(rough_matte, 0.25)
+    np.testing.assert_allclose(comparison[:, :, 0], 0.25)
+    np.testing.assert_allclose(comparison[:, :, 1], 0.4)
     np.testing.assert_array_equal(comparison[:, :, 2], 0.0)
 
 

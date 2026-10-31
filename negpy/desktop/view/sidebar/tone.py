@@ -446,8 +446,6 @@ class ToneSidebar(BaseSidebar):
                     if active_roi is not None:
                         y1, y2, x1, x2 = (int(value) for value in active_roi)
                         normalized_source = normalized_source[y1:y2, x1:x2]
-                    if positive_source.shape[:2] != normalized_source.shape[:2]:
-                        raise ValueError("The rendered positive and normalized negative have different dimensions.")
                     final_positive = np.ascontiguousarray(positive_source[:, :, :3]).copy()
                     final_positive = np.ascontiguousarray(apply_display_transform(final_positive, WORKING_COLOR_SPACE), dtype=np.float32)
                     normalized_log = np.ascontiguousarray(normalized_source[:, :, :3]).copy()
