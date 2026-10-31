@@ -6,14 +6,14 @@ the crop boundary, the migration and CPU/GPU parity.
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from negpy.domain.models import WorkspaceConfig
 from negpy.features.exposure.logic import MASK_AIM_CODE, MASK_CODES_PER_DENSITY, MASK_MID_CODE, contrast_mask_coeffs, contrast_mask_ev
-from negpy.features.exposure.models import ContrastMaskArea
-from negpy.features.exposure.normalization import LogNegativeBounds, contrast_mask_plane
+from negpy.features.exposure.normalization import LogNegativeBounds, contrast_mask_plane, contrast_mask_plane_with_input
 from negpy.features.exposure.normalization import contrast_mask_matte_plane
 from negpy.infrastructure.gpu.device import GPUDevice
 from negpy.services.rendering.engine import DarkroomEngine
@@ -156,52 +156,40 @@ class TestContrastMaskCoeffs(unittest.TestCase):
 
 class TestContrastMaskMatte(unittest.TestCase):
     def setUp(self):
-        self.image = np.zeros((120, 180, 3), dtype=np.float32)
+        self.image = _wide_range_negative(120, 180)
 
-    def _plane(self, area: ContrastMaskArea, **geometry) -> np.ndarray:
-        return contrast_mask_matte_plane(self.image, area, **geometry)
+    def test_disabled_sky_restriction_returns_full_coverage_without_inference(self):
+        from negpy.services.assets import sky_matte
 
-    def test_each_raw_half_selects_its_own_region(self):
-        cases = (
-            (ContrastMaskArea.TOP, (slice(0, 60), slice(None))),
-            (ContrastMaskArea.BOTTOM, (slice(60, None), slice(None))),
-            (ContrastMaskArea.LEFT, (slice(None), slice(0, 90))),
-            (ContrastMaskArea.RIGHT, (slice(None), slice(90, None))),
-        )
-        for area, selected in cases:
-            with self.subTest(area=area):
-                plane = self._plane(area)
-                self.assertTrue(np.all(plane[selected] == 1.0))
-                self.assertEqual(float(plane.mean()), 0.5)
+        with patch.object(sky_matte, "get_sky_matte", side_effect=AssertionError("inference requested")):
+            plane = contrast_mask_matte_plane(
+                self.image,
+                _BOUNDS,
+                None,
+                False,
+                rotation=3,
+                roi_norm=(0.25, 0.75, 0.0, 0.5),
+            )
+        self.assertEqual(plane.shape, (90, 60))
+        np.testing.assert_array_equal(plane, 1.0)
 
-    def test_raw_left_half_rotates_to_the_top_after_clockwise_rotation(self):
-        plane = self._plane(ContrastMaskArea.LEFT, rotation=3)
-        self.assertEqual(plane.shape, (180, 120))
-        self.assertEqual(float(plane[:90].mean()), 1.0)
-        self.assertEqual(float(plane[90:].mean()), 0.0)
+    def test_enabled_sky_matte_uses_rough_positive_from_shared_normalized_input(self):
+        from negpy.services.assets import sky_matte
 
-    def test_horizontal_flip_moves_the_raw_left_half_to_the_right(self):
-        plane = self._plane(ContrastMaskArea.LEFT, flip_horizontal=True)
-        self.assertEqual(float(plane[:, :90].mean()), 0.0)
-        self.assertEqual(float(plane[:, 90:].mean()), 1.0)
+        _, _, normalized_log = contrast_mask_plane_with_input(self.image, _BOUNDS, None)
+        expected = sky_matte.rough_positive_proxy(normalized_log)
+        observed = {}
 
-    def test_fine_rotation_interpolates_the_split_edge(self):
-        plane = self._plane(ContrastMaskArea.LEFT, fine_rotation=7.0)
-        self.assertTrue(np.any((plane > 0.0) & (plane < 1.0)))
+        def fake_get_matte(image, _key, wait, _on_status):
+            observed.update(image=image, wait=wait)
+            return np.full(image.shape[:2], 0.25, dtype=np.float32)
 
-    def test_distortion_and_keystone_transform_the_matte(self):
-        source = self._plane(ContrastMaskArea.LEFT)
-        distorted = self._plane(ContrastMaskArea.LEFT, distortion_k1=0.15)
-        tilted = self._plane(ContrastMaskArea.LEFT, converge_v=8.0, converge_h=-5.0)
-        self.assertFalse(np.array_equal(source, distorted))
-        self.assertFalse(np.array_equal(source, tilted))
-        self.assertTrue(np.any((distorted > 0.0) & (distorted < 1.0)))
-        self.assertTrue(np.any((tilted > 0.0) & (tilted < 1.0)))
+        with patch.object(sky_matte, "get_sky_matte", side_effect=fake_get_matte):
+            plane = contrast_mask_matte_plane(self.image, _BOUNDS, None, True, wait=True)
 
-    def test_crop_is_applied_after_geometry(self):
-        plane = self._plane(ContrastMaskArea.LEFT, roi_norm=(0.25, 0.75, 0.0, 0.5))
-        self.assertEqual(plane.shape, (60, 90))
-        self.assertTrue(np.all(plane == 1.0))
+        np.testing.assert_array_equal(observed["image"], expected)
+        self.assertTrue(observed["wait"])
+        np.testing.assert_array_equal(plane, 0.25)
 
 
 class TestContrastMaskRender(unittest.TestCase):
@@ -229,19 +217,13 @@ class TestContrastMaskRender(unittest.TestCase):
         explicit = _render(img, _bw_settings(grade=60.0, contrast_mask_strength=0.0), "cm-off")
         np.testing.assert_allclose(off, explicit, atol=1e-6)
 
-    def test_disabled_split_matte_ignores_the_active_area(self):
+    def test_disabled_sky_restriction_preserves_the_contrast_mask(self):
         img = _wide_range_negative()
-        top = _render(
-            img,
-            _bw_settings(grade=60.0, contrast_mask_strength=1.0, contrast_mask_matte_area=ContrastMaskArea.TOP),
-            "cm-no-matte-top",
-        )
-        right = _render(
-            img,
-            _bw_settings(grade=60.0, contrast_mask_strength=1.0, contrast_mask_matte_area=ContrastMaskArea.RIGHT),
-            "cm-no-matte-right",
-        )
-        np.testing.assert_array_equal(top, right)
+        settings = _bw_settings(grade=60.0, contrast_mask_strength=1.0)
+        with patch("negpy.services.assets.sky_matte.make_sky_matte", side_effect=AssertionError("model called")):
+            unrestricted = _render(img, settings, "cm-no-sky")
+        self.assertFalse(settings.exposure.contrast_mask_sky_only)
+        self.assertTrue(np.isfinite(unrestricted).all())
 
     def test_a_slide_builds_no_plane(self):
         """The transfer curve reads no mask, so its plane is not worth building."""
@@ -277,17 +259,17 @@ class TestContrastMaskMigration(unittest.TestCase):
         config = WorkspaceConfig.from_flat_dict(WorkspaceConfig.from_flat_dict({"contrast_mask_strength": 0.3}).to_dict())
         self.assertAlmostEqual(config.exposure.contrast_mask_strength, 0.3)
 
-    def test_split_matte_settings_round_trip(self):
-        config = WorkspaceConfig.from_flat_dict({"contrast_mask_split_matte": True, "contrast_mask_matte_area": "right"})
-        self.assertTrue(config.exposure.contrast_mask_split_matte)
-        self.assertEqual(config.exposure.contrast_mask_matte_area, ContrastMaskArea.RIGHT)
+    def test_sky_only_setting_round_trips_and_old_split_settings_are_dropped(self):
+        config = WorkspaceConfig.from_flat_dict(
+            {"contrast_mask_sky_only": True, "contrast_mask_split_matte": True, "contrast_mask_matte_area": "right"}
+        )
+        self.assertTrue(config.exposure.contrast_mask_sky_only)
         restored = WorkspaceConfig.from_flat_dict(config.to_dict())
-        self.assertEqual(restored.exposure.contrast_mask_matte_area, ContrastMaskArea.RIGHT)
+        self.assertTrue(restored.exposure.contrast_mask_sky_only)
 
-    def test_split_matte_defaults_off_with_top_active_area(self):
+    def test_sky_only_defaults_off(self):
         config = WorkspaceConfig.from_flat_dict({})
-        self.assertFalse(config.exposure.contrast_mask_split_matte)
-        self.assertEqual(config.exposure.contrast_mask_matte_area, ContrastMaskArea.TOP)
+        self.assertFalse(config.exposure.contrast_mask_sky_only)
 
 
 @unittest.skipUnless(GPUDevice.get().is_available, "GPU not available")
@@ -336,18 +318,25 @@ class TestContrastMaskParity(unittest.TestCase):
             "contrast-mask-parity-crop",
         )
 
-    def test_cpu_gpu_match_split_matte_after_rotation_and_crop(self):
+    def test_cpu_gpu_match_sky_only_after_rotation_and_crop(self):
+        from unittest.mock import patch
+        from negpy.services.assets import sky_matte
+
         settings = _bw_settings(
             grade=60.0,
             contrast_mask_strength=1.0,
-            contrast_mask_split_matte=True,
-            contrast_mask_matte_area=ContrastMaskArea.LEFT,
+            contrast_mask_sky_only=True,
         )
         settings = replace(
             settings,
             geometry=replace(settings.geometry, rotation=3, crop_rect=(0.1, 0.15, 0.75, 0.65)),
         )
-        self._assert_match(settings, "contrast-mask-split-matte-rotated-crop")
+        with patch.object(
+            sky_matte,
+            "get_sky_matte",
+            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+        ):
+            self._assert_match(settings, "contrast-mask-sky-only-rotated-crop")
 
     def test_slider_uploads_no_texture(self):
         base = _bw_settings(grade=60.0, contrast_mask_strength=1.0)
@@ -360,24 +349,59 @@ class TestContrastMaskParity(unittest.TestCase):
         self.assertEqual(engine._mask_tex_key, mask_key)
         self.assertEqual(engine._local_ev_key, ev_key)
 
-    def test_active_area_change_uploads_the_matte_texture(self):
-        base = _bw_settings(
-            grade=60.0,
-            contrast_mask_strength=1.0,
-            contrast_mask_split_matte=True,
-            contrast_mask_matte_area=ContrastMaskArea.LEFT,
-        )
-        self._render(base, "contrast-mask-matte-cache", prefer_gpu=True)
+    def test_sky_only_toggle_uploads_the_matte_texture(self):
+        from unittest.mock import patch
+        from negpy.services.assets import sky_matte
+
+        base = _bw_settings(grade=60.0, contrast_mask_strength=1.0)
+        with patch.object(
+            sky_matte,
+            "get_sky_matte",
+            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+        ):
+            self._render(
+                replace(base, exposure=replace(base.exposure, contrast_mask_sky_only=True)), "contrast-mask-matte-cache", prefer_gpu=True
+            )
         engine = self.processor.engine_gpu
         matte_key = engine._matte_tex_key
         self.assertIsNotNone(matte_key)
-
-        updated = replace(
-            base,
-            exposure=replace(base.exposure, contrast_mask_matte_area=ContrastMaskArea.RIGHT),
-        )
-        self._render(updated, "contrast-mask-matte-cache", prefer_gpu=True)
+        with patch.object(
+            sky_matte,
+            "get_sky_matte",
+            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+        ):
+            self._render(base, "contrast-mask-matte-cache", prefer_gpu=True)
         self.assertNotEqual(engine._matte_tex_key, matte_key)
+
+    def test_gpu_matte_completion_reports_the_original_source_hash(self):
+        from unittest.mock import Mock, patch
+        from negpy.services.assets import sky_matte
+
+        settings = _bw_settings(contrast_mask_strength=1.0, contrast_mask_sky_only=True)
+        callback = Mock()
+        self.processor.on_sky_matte_status = callback
+
+        def finish_matte(image, _key, _wait, on_status):
+            if on_status is not None:
+                on_status("calculating", None)
+                on_status("done", None)
+            return np.ones(image.shape[:2], dtype=np.float32)
+
+        with patch.object(sky_matte, "get_sky_matte", side_effect=finish_matte):
+            self.processor.run_pipeline(
+                self.img.copy(),
+                settings,
+                "source-frame",
+                render_size_ref=float(max(self.img.shape[:2])),
+                prefer_gpu=True,
+                readback_metrics=False,
+            )
+
+        self.assertEqual(callback.call_count, 2)
+        self.assertEqual(callback.call_args_list[0].args[0], "source-frame")
+        self.assertEqual(callback.call_args_list[0].args[2], "calculating")
+        self.assertEqual(callback.call_args_list[1].args[2], "done")
+        self.assertIsNone(callback.call_args_list[1].args[3])
 
 
 if __name__ == "__main__":

@@ -547,6 +547,7 @@ class AppController(QObject):
     """
 
     image_updated = pyqtSignal()
+    sky_matte_status_changed = pyqtSignal(str, object, str, object)
     preview_loaded = pyqtSignal()
     metrics_available = pyqtSignal(dict)
     loading_started = pyqtSignal()
@@ -885,6 +886,7 @@ class AppController(QObject):
         self.canvas: Any = None
         self._is_rendering = False
         self._busy_toast = False
+        self._sky_matte_pending_identity: Optional[tuple[str, WorkspaceConfig]] = None
         self._pending_render_task: Any = None
 
         # Correction states share the bounded cache, so toggling back can paint immediately.
@@ -1087,6 +1089,7 @@ class AppController(QObject):
         self.render_worker.pick_better_finished.connect(self.on_pick_better_finished)
         self.render_worker.strip_progress.connect(self.on_strip_progress)
         self.render_worker.busy.connect(self._on_render_busy)
+        self.render_worker.sky_matte_status.connect(self._on_sky_matte_status)
         self.render_worker.finished.connect(self._on_render_finished)
         self.render_worker.metrics_updated.connect(self._on_metrics_updated)
         self.render_worker.error.connect(self._on_render_error)
@@ -9643,6 +9646,27 @@ class AppController(QObject):
         """Slow uncached render step (IR bake, inpaint) — hold a toast until the frame lands."""
         self._busy_toast = True
         self.set_status(label, _BUSY_TOAST_MS)
+
+    def _on_sky_matte_status(self, source_hash: str, config: WorkspaceConfig, status: str, error: Optional[Exception]) -> None:
+        if (
+            source_hash != (self.state.current_file_hash or "preview")
+            or config != self.state.config
+            or not self.state.config.exposure.contrast_mask_sky_only
+        ):
+            return
+        self.sky_matte_status_changed.emit(source_hash, config, status, error)
+        identity = (source_hash, config)
+        if status == "calculating":
+            self._sky_matte_pending_identity = identity
+        elif status == "failed":
+            if self._sky_matte_pending_identity == identity:
+                self._sky_matte_pending_identity = None
+            logger.error("Sky matte inference failed: %s", error)
+            reason = str(error).strip() if error is not None else ""
+            self.set_status(tr("Sky matte failed: {reason}", reason=reason or tr("Unknown error")), 7000, "error")
+        elif status == "done" and self._sky_matte_pending_identity == identity:
+            self._sky_matte_pending_identity = None
+            self.request_render(readback_metrics=True)
 
     def _clear_busy_toast(self) -> None:
         if self._busy_toast:

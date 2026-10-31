@@ -287,9 +287,8 @@ How light or dark the print is, and how much contrast it has.
     *   **Preflash**: brings back detail in the brightest areas.
     *   **Diffusion**: a soft glow; dark areas spread into bright ones.
     *   **Contrast Mask**: opens large dark areas and holds back large bright ones, while keeping fine detail. A blurred negative mask creates this effect in the darkroom. Frontier HyperTone makes a similar digital effect. Low-contrast frames change less.
-    *   **Split Matte**: applies Contrast Mask to one half of the raw scan. The matte follows rotation, alignment and crop.
-    *   **Active area**: choose the raw scan's top, bottom, left or right half for the effect.
-    *   **Show Sky Matte**: shows the print matte in green and the inverted-negative matte in red. The comparison shows overlap in yellow. It does not change the print.
+    *   **Sky Only**: limits Contrast Mask to the sky detected in the frame. The caption reports whether its matte is calculating, done or failed.
+    *   **Show Sky Matte**: previews the detected sky matte beside its input image. It does not change the print.
 *   **Global / R / G / B**: R, G or B applies the grades to one color only, for a cast that differs between shadows and highlights.
 
 **White Point** and **Black Point** are on the Roll tab's **Metering** card ([§10.5](#105-metering-negative--positive)).

@@ -41,6 +41,8 @@ class PipelineContext:
     # Whether the caller reads the Analysis metrics back. A render that does not (a splash, a
     # thumbnail, a test strip) skips measurements that only the Analysis panel shows.
     readback_metrics: bool = True
+    wait_for_sky_matte: bool = False
+    sky_matte_status: Optional[Callable[[str, WorkspaceConfig, str, Optional[Exception]], None]] = None
 
 
 class IImageSource(Protocol):

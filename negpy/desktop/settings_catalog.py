@@ -116,10 +116,6 @@ def _fmt_flatfield(values: tuple) -> str:
     return profile.name if profile else _fmt_scalar(True)
 
 
-def _fmt_contrast_mask_area(values: tuple) -> str:
-    return tr(str(values[0]).title())
-
-
 def _fmt_white_balance(values: tuple) -> str:
     return tr("Linear RAW") if values[0] else tr("Camera WB")
 
@@ -216,8 +212,7 @@ CATALOG: list[tuple[str, tuple[SettingRow, ...]]] = [
         _row(mark("Shadows Grade Trim"), "exposure", "shadow_grade_trim_red", "shadow_grade_trim_green", "shadow_grade_trim_blue", channels="RGB"),
         _row(mark("Highlights Grade Trim"), "exposure", "highlight_grade_trim_red", "highlight_grade_trim_green", "highlight_grade_trim_blue", channels="RGB"),
         _row(mark("Contrast Mask"), "exposure", "contrast_mask_strength"),
-        _row(mark("Split Matte"), "exposure", "contrast_mask_split_matte"),
-        _row(mark("Active area"), "exposure", "contrast_mask_matte_area", fmt=_fmt_contrast_mask_area),
+        _row(mark("Sky Only"), "exposure", "contrast_mask_sky_only"),
         _row(mark("Diffusion"), "exposure", "diffusion"),
         _row(mark("Preflash"), "exposure", "preflash"),
         _row(mark("Auto Density"), "exposure", "auto_exposure", sticky=True),
@@ -523,8 +518,7 @@ TONE_FIELDS = (
     "auto_exposure",
     "auto_normalize_contrast",
     "contrast_mask_strength",
-    "contrast_mask_split_matte",
-    "contrast_mask_matte_area",
+    "contrast_mask_sky_only",
     "diffusion",
     "preflash",
 )

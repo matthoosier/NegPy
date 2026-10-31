@@ -487,6 +487,7 @@ class ImageProcessor:
         # Called with a label when a slow uncached step starts, for a UI busy cue. Set by
         # RenderWorker. The caller runs on the render thread, so keep it to a signal emit.
         self.on_slow_step: Optional[Callable[[str], None]] = None
+        self.on_sky_matte_status: Optional[Callable[[str, WorkspaceConfig, str, Optional[Exception]], None]] = None
 
         if use_gpu and APP_CONFIG.use_gpu:
             gpu = GPUDevice.get()
@@ -782,10 +783,12 @@ class ImageProcessor:
         gain_slices: tuple = (),
         source_orientation: int = 1,
         film_base: Optional[tuple] = None,
+        wait_for_sky_matte: bool = False,
     ) -> Tuple[Any, Dict[str, Any]]:
         """Executes rendering pipeline. Returns result (ndarray/GPUTexture) and metrics. ``skip_flatfield``: the export CPU
         fallbacks pass an already flat-fielded buffer. ``gain_slices``: the ``slice_half`` cuts that took *img* out of the
         decoded frame. ``source_orientation``: the EXIF orientation baked into *img*. The flat-field gain takes both."""
+        sky_matte_source_hash = source_hash
         # Flat-field is a source pre-correction, before geometry and crop. Folding its token
         # into source_hash invalidates the engine cache when it changes. Stitch buffers arrive
         # per-part flat-fielded, because correcting the composite canvas as one frame would
@@ -884,6 +887,14 @@ class ImageProcessor:
             camera_wb=camera_wb,
             cache_stages=cache_stages,
             readback_metrics=readback_metrics,
+            wait_for_sky_matte=wait_for_sky_matte,
+            sky_matte_status=(
+                lambda _pipeline_hash, _config, matte_status, error: self.on_sky_matte_status(
+                    sky_matte_source_hash, settings, matte_status, error
+                )
+                if self.on_sky_matte_status is not None
+                else None
+            ),
         )
         if metrics:
             context.metrics.update(metrics)
@@ -938,6 +949,8 @@ class ImageProcessor:
                             source_base_log=source_base,
                             memory_bounded=True,
                             render_size_ref=render_size_ref,
+                            wait_for_sky_matte=wait_for_sky_matte,
+                            sky_matte_status=context.sky_matte_status,
                         )
                     else:
                         self.engine_gpu.evict_stale_textures(destroy=False)
@@ -954,6 +967,8 @@ class ImageProcessor:
                             film_base=film_base,
                             source_base_log=source_base,
                             full_frame=crop_preview_full,
+                            wait_for_sky_matte=wait_for_sky_matte,
+                            sky_matte_status=context.sky_matte_status,
                         )
                 context.metrics.update(gpu_metrics)
                 return processed, context.metrics
@@ -1530,6 +1545,7 @@ class ImageProcessor:
                     camera_wb=camera_wb,
                     source_hash=export_hash,
                     analysis_source_hash=export_hash,
+                    wait_for_sky_matte=True,
                 )
             content_rect = _gpu_metrics.get("content_rect")
         else:
@@ -1545,6 +1561,7 @@ class ImageProcessor:
                 skip_flatfield=True,  # f32_buffer already flat-fielded by _load_source_f32
                 cam_xyz=cam_xyz,
                 camera_wb=camera_wb,
+                wait_for_sky_matte=True,
             )
             buffer, content_rect = PrintService.apply_layout(
                 buffer,

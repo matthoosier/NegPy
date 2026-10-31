@@ -102,6 +102,8 @@ DROPPED_KEYS: frozenset[str] = frozenset(
         "contact_sheet_default_label_color",
         # The on-export bake is now an app-global toggle, not a per-edit field.
         "export_bake_auto_density_grade",
+        "contrast_mask_split_matte",
+        "contrast_mask_matte_area",
     }
 )
 

@@ -1,10 +1,13 @@
+from typing import Optional
+
 from negpy.kernel.system.i18n import tr
 from dataclasses import replace
 
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
 
 import numpy as np
 
+from negpy.domain.models import WorkspaceConfig
 from negpy.desktop.auto_sliders import shown_values, stored_value
 from negpy.desktop.view.widgets.sky_matte_dialog import SkyMatteDialog
 from negpy.desktop.view.confirm import warn_targets_affect_unbaked
@@ -13,11 +16,11 @@ from negpy.desktop.view.sidebar.base import BaseSidebar, SliderPage
 from negpy.desktop.view.styles.templates import (
     ICON_BUTTON_WIDTH,
     TEST_STRIP_SWEEP,
-    field_row,
     gradient_icon,
     hint_label,
     labeled_action,
     labeled_toggle,
+    set_hint_kind,
     wrap_tooltip,
 )
 from negpy.desktop.view.styles.theme import THEME
@@ -25,14 +28,12 @@ from negpy.desktop.view.widgets.segmented_choice import SegmentedChoice, ToggleM
 from negpy.desktop.view.widgets.collapsible import hidden_by_gating
 from negpy.desktop.view.widgets.fold import group_fold, rail_fold
 from negpy.desktop.view.widgets.sliders import CompactSlider
-from negpy.desktop.view.widgets.step_combo import StepCombo
 from negpy.features.hdr.models import hdr_active
 from negpy.features.exposure.auto_sliders import NEUTRAL
-from negpy.features.exposure.models import ContrastMaskArea, EXPOSURE_CONSTANTS, TUNABLE_TARGETS, apply_targets
-from negpy.infrastructure.display.color_mgmt import apply_display_transform
-from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
+from negpy.features.exposure.models import EXPOSURE_CONSTANTS, TUNABLE_TARGETS, apply_targets
 from negpy.infrastructure.gpu.resources import GPUTexture
 from negpy.kernel.system.logging import get_logger
+from negpy.services.assets.sky_matte import rough_positive_proxy
 
 logger = get_logger(__name__)
 _ISO_R_MIN = float(EXPOSURE_CONSTANTS["iso_r_min"])
@@ -180,26 +181,21 @@ class ToneSidebar(BaseSidebar):
                 "Contrast Mask: a soft darkroom mask that opens up large dark areas and holds back large bright ones, modeled on the Fujifilm Frontier's digital interpretation."
             )
         )
-        self.contrast_mask_split_matte_btn = labeled_toggle(
-            "fa5s.columns",
-            tr("Split Matte"),
-            conf.contrast_mask_split_matte,
-            tr("Limit the Contrast Mask effect to one raw scan half, transformed with the frame."),
+        self.contrast_mask_sky_only_btn = labeled_toggle(
+            "fa5s.cloud",
+            tr("Sky Only"),
+            conf.contrast_mask_sky_only,
+            tr("Apply the Contrast Mask only to the detected sky."),
         )
-        self.contrast_mask_matte_area_combo = StepCombo.of(
-            [tr("Top"), tr("Bottom"), tr("Left"), tr("Right")],
-            tr("Choose which half of the raw scan receives the Contrast Mask effect."),
-            list(ContrastMaskArea),
-        )
-        self.contrast_mask_matte_area_row = QWidget()
-        self.contrast_mask_matte_area_row.setLayout(field_row(tr("Active area"), self.contrast_mask_matte_area_combo))
-        self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
+        self.sky_matte_status_label = hint_label()
+        self.sky_matte_status_label.setVisible(conf.contrast_mask_sky_only)
+        if conf.contrast_mask_sky_only:
+            self._set_sky_matte_status("calculating")
         self.show_sky_matte_btn = labeled_action(
             "fa5s.cloud",
             tr("Show Sky Matte"),
             tr("Preview an automatically detected sky matte for the current frame."),
         )
-        self.show_sky_matte_btn.setVisible(conf.contrast_mask_split_matte)
         self.show_sky_matte_btn.clicked.connect(self._show_sky_matte)
         # Light given to the paper, not the shape of its curve, so it sits with the exposure controls.
         self.preflash_slider = CompactSlider(tr("Preflash"), 0.0, 1.0, conf.preflash)
@@ -211,8 +207,8 @@ class ToneSidebar(BaseSidebar):
             self.preflash_slider,
             self.diffusion_slider,
             self.contrast_mask_slider,
-            self.contrast_mask_split_matte_btn,
-            self.contrast_mask_matte_area_row,
+            self.contrast_mask_sky_only_btn,
+            self.sky_matte_status_label,
             self.show_sky_matte_btn,
         )
         self.layout.addLayout(aids_header)
@@ -230,8 +226,7 @@ class ToneSidebar(BaseSidebar):
             # A pan masking film is neutral: the mask is one plane subtracted as equal
             # density from every layer, so it has no per-channel form to trim.
             self.contrast_mask_slider,
-            self.contrast_mask_split_matte_btn,
-            self.contrast_mask_matte_area_row,
+            self.contrast_mask_sky_only_btn,
             self.show_sky_matte_btn,
             # A diffuser spreads every layer's light alike.
             self.diffusion_slider,
@@ -310,6 +305,7 @@ class ToneSidebar(BaseSidebar):
         # The strip is session state, not config, and any render drops it, so the button has to
         # follow the controller rather than sync_ui.
         self.controller.test_strip_changed.connect(self._sync_test_strip_btn)
+        self.controller.sky_matte_status_changed.connect(self._on_sky_matte_status_changed)
         self.ch_btn.currentChanged.connect(lambda _i: self.sync_ui())
 
         # White Point/Black Point live on ProcessConfig, not ExposureConfig like the rest of
@@ -321,6 +317,7 @@ class ToneSidebar(BaseSidebar):
             slider.dragStarted.connect(lambda f=field: self.controller.tone_drag_changed.emit(f))
             slider.dragEnded.connect(lambda: self.controller.tone_drag_changed.emit(""))
         self.controller.image_updated.connect(self._sync_driven)
+        self.controller.image_updated.connect(self._sync_sky_matte_status)
         self.hold_black_action.toggled.connect(
             lambda checked: self.update_config_section("exposure", render=True, persist=True, readback_metrics=True, hold_black=checked)
         )
@@ -339,16 +336,7 @@ class ToneSidebar(BaseSidebar):
             slider.dragStarted.connect(lambda f=field: self.controller.tone_drag_changed.emit(f))
             slider.dragEnded.connect(lambda: self.controller.tone_drag_changed.emit(""))
 
-        self.contrast_mask_split_matte_btn.toggled.connect(lambda checked: self._set_split_matte_enabled(checked))
-        self.contrast_mask_matte_area_combo.currentIndexChanged.connect(
-            lambda index: self.update_config_section(
-                "exposure",
-                render=True,
-                persist=True,
-                readback_metrics=True,
-                contrast_mask_matte_area=self.contrast_mask_matte_area_combo.itemData(index),
-            )
-        )
+        self.contrast_mask_sky_only_btn.toggled.connect(self._on_sky_only_toggled)
 
         # Split grade retargets to the selected channel's trim field at emit time.
         for slider, base in (
@@ -403,17 +391,6 @@ class ToneSidebar(BaseSidebar):
     def _meters(self) -> dict:
         return self.state.auto_meters.get(self.state.current_file_hash or "", {})
 
-    def _set_split_matte_enabled(self, enabled: bool) -> None:
-        self.contrast_mask_matte_area_row.setVisible(enabled)
-        self.show_sky_matte_btn.setVisible(enabled)
-        self.update_config_section(
-            "exposure",
-            render=True,
-            persist=True,
-            readback_metrics=True,
-            contrast_mask_split_matte=enabled,
-        )
-
     def _show_sky_matte(self) -> None:
         state = self.state
         frame_hash, config = state.current_file_hash, state.config
@@ -421,34 +398,23 @@ class ToneSidebar(BaseSidebar):
             metrics = dict(state.last_metrics)
 
         expected_identity = (frame_hash, config)
-        final_positive = None
-        normalized_log = None
+        rough_positive = None
         error = ""
         if not frame_hash or metrics.get("render_identity") != expected_identity:
             error = tr("Render the current frame before showing the sky matte.")
         else:
-            positive_source = metrics.get("base_positive")
             normalized_source = metrics.get("normalized_log")
             try:
-                if isinstance(positive_source, GPUTexture):
-                    positive_source = positive_source.readback()
                 if isinstance(normalized_source, GPUTexture):
                     normalized_source = normalized_source.readback()
-                if positive_source is not None and normalized_source is not None:
-                    positive_source = np.asarray(positive_source, dtype=np.float32)
+                if normalized_source is not None:
                     normalized_source = np.asarray(normalized_source, dtype=np.float32)
-                    logger.debug(f"Launching Sky Matte Preview on positive source {positive_source.shape[1]}x{positive_source.shape[0]}")
-                    content_rect = metrics.get("content_rect")
-                    if content_rect is not None:
-                        x, y, width, height = (int(value) for value in content_rect)
-                        positive_source = positive_source[y : y + height, x : x + width]
                     active_roi = metrics.get("active_roi")
                     if active_roi is not None:
                         y1, y2, x1, x2 = (int(value) for value in active_roi)
                         normalized_source = normalized_source[y1:y2, x1:x2]
-                    final_positive = np.ascontiguousarray(positive_source[:, :, :3]).copy()
-                    final_positive = np.ascontiguousarray(apply_display_transform(final_positive, WORKING_COLOR_SPACE), dtype=np.float32)
-                    normalized_log = np.ascontiguousarray(normalized_source[:, :, :3]).copy()
+                    rough_positive = rough_positive_proxy(normalized_source[:, :, :3])
+                    logger.debug("Launching Sky Matte Preview on rough positive %dx%d", rough_positive.shape[1], rough_positive.shape[0])
                 else:
                     error = tr("Render the current frame before showing the sky matte.")
             except Exception as exc:
@@ -461,7 +427,7 @@ class ToneSidebar(BaseSidebar):
             with state.metrics_lock:
                 return state.last_metrics.get("render_identity") == expected_identity
 
-        dialog = SkyMatteDialog(final_positive, normalized_log, is_current, parent=self.window(), error=error)
+        dialog = SkyMatteDialog(rough_positive, is_current, parent=self.window(), repo=self.controller.session.repo, error=error)
         self.controller.image_updated.connect(dialog.invalidate)
         dialog.show()
 
@@ -546,10 +512,8 @@ class ToneSidebar(BaseSidebar):
                 self.ch_btn.set_edited(i, any(getattr(conf, f) != 0.0 for f in fields))
             self._sync_driven()
             self.contrast_mask_slider.setValue(conf.contrast_mask_strength)
-            self.contrast_mask_split_matte_btn.setChecked(conf.contrast_mask_split_matte)
-            self.contrast_mask_matte_area_combo.setCurrentIndex(self.contrast_mask_matte_area_combo.findData(conf.contrast_mask_matte_area))
-            self.contrast_mask_matte_area_row.setVisible(conf.contrast_mask_split_matte)
-            self.show_sky_matte_btn.setVisible(conf.contrast_mask_split_matte)
+            self.contrast_mask_sky_only_btn.setChecked(conf.contrast_mask_sky_only)
+            self._sync_sky_matte_status()
             self.diffusion_slider.setValue(conf.diffusion)
             self.preflash_slider.setValue(conf.preflash)
             self.hold_black_action.setChecked(conf.hold_black)
@@ -571,8 +535,8 @@ class ToneSidebar(BaseSidebar):
             self.shadow_grade_slider,
             self.highlight_grade_slider,
             self.contrast_mask_slider,
-            self.contrast_mask_split_matte_btn,
-            self.contrast_mask_matte_area_combo,
+            self.contrast_mask_sky_only_btn,
+            self.sky_matte_status_label,
             self.diffusion_slider,
             self.preflash_slider,
             self.hold_black_action,
@@ -581,3 +545,53 @@ class ToneSidebar(BaseSidebar):
             self.auto_both_action,
         ):
             w.blockSignals(blocked)
+
+    def _sync_sky_matte_status(self) -> None:
+        enabled = self.state.config.exposure.contrast_mask_sky_only
+        self.sky_matte_status_label.setVisible(enabled)
+        if not enabled:
+            self.sky_matte_status_label.clear()
+            return
+        identity = (self.state.current_file_hash or "preview", self.state.config)
+        if getattr(self, "_sky_matte_status_identity", None) != identity:
+            self._sky_matte_status_identity = identity
+            self._set_sky_matte_status("calculating")
+
+    def _on_sky_only_toggled(self, checked: bool) -> None:
+        self._sky_matte_status_identity = None
+        self.sky_matte_status_label.setVisible(checked)
+        if checked:
+            self._set_sky_matte_status("calculating")
+        else:
+            self.sky_matte_status_label.clear()
+        self.update_config_section(
+            "exposure",
+            render=True,
+            persist=True,
+            readback_metrics=True,
+            contrast_mask_sky_only=checked,
+        )
+
+    def _on_sky_matte_status_changed(self, source_hash: str, config: WorkspaceConfig, status: str, error: Optional[Exception]) -> None:
+        if (
+            source_hash != (self.state.current_file_hash or "preview")
+            or config != self.state.config
+            or not self.state.config.exposure.contrast_mask_sky_only
+        ):
+            return
+        self._sky_matte_status_identity = (source_hash, config)
+        self._set_sky_matte_status(status, error)
+
+    def _set_sky_matte_status(self, status: str, error: Optional[Exception] = None) -> None:
+        if status == "calculating":
+            self.sky_matte_status_label.setText(tr("Calculating"))
+            set_hint_kind(self.sky_matte_status_label, "muted")
+        elif status == "done":
+            self.sky_matte_status_label.setText(tr("Done"))
+            set_hint_kind(self.sky_matte_status_label, "success")
+        elif status == "failed":
+            reason = str(error) if error is not None else tr("Unknown error")
+            self.sky_matte_status_label.setText(tr("Failed ({reason})", reason=reason))
+            set_hint_kind(self.sky_matte_status_label, "error")
+        else:
+            raise ValueError(f"Unknown sky matte status: {status}")

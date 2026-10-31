@@ -34,15 +34,6 @@ class BwFilter(StrEnum):
         return cls.NONE
 
 
-class ContrastMaskArea(StrEnum):
-    """The opaque half of a raw scan for the Contrast Mask split matte."""
-
-    TOP = "top"
-    BOTTOM = "bottom"
-    LEFT = "left"
-    RIGHT = "right"
-
-
 @dataclass(frozen=True)
 class ExposureConfig:
     """
@@ -74,8 +65,7 @@ class ExposureConfig:
     # Tone mask: lifts large dark areas and holds back large bright ones, more the farther they sit
     # from mid-gray (contrast_mask_coeffs). [0, 1]; 0 = off.
     contrast_mask_strength: float = 0.0
-    contrast_mask_split_matte: bool = False
-    contrast_mask_matte_area: ContrastMaskArea = ContrastMaskArea.TOP
+    contrast_mask_sky_only: bool = False
     # A diffuser under the enlarger lens: the paper sees the light mixed with a blurred copy,
     # so shadows bleed into highlights. [0, 1]; 0 = off; fixed spread (DIFFUSION_PSF).
     diffusion: float = 0.0
@@ -147,7 +137,6 @@ class ExposureConfig:
         if isinstance(self.cast_removal_strength, bool):
             object.__setattr__(self, "cast_removal_strength", 1.0 if self.cast_removal_strength else 0.0)
         object.__setattr__(self, "bw_filter", BwFilter(self.bw_filter))
-        object.__setattr__(self, "contrast_mask_matte_area", ContrastMaskArea(self.contrast_mask_matte_area))
 
 
 EXPOSURE_CONSTANTS: Dict[str, Any] = {

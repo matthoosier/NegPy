@@ -20,8 +20,8 @@ from negpy.features.exposure.processor import (
 from negpy.features.exposure.bw_filter import collapse_weights, plane_weights, printed_exposure
 from negpy.features.exposure.logic import expand_mask_plane
 from negpy.features.exposure.normalization import (
-    contrast_mask_matte_plane,
-    contrast_mask_plane,
+    contrast_mask_matte_plane_with_status,
+    contrast_mask_plane_with_input,
     diffusion_grid,
     diffusion_plane,
     base_scan_density,
@@ -265,16 +265,17 @@ class DarkroomEngine:
         mask_bounds = context.metrics.get("pre_trim_bounds", context.metrics.get("final_bounds"))
         # Print curve only, as Diffusion: the transfer curve and the Flat master take no plane.
         if (
-            settings.exposure.contrast_mask_strength > 0.0
+            (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only)
             and mask_bounds is not None
             and render_path(settings.process) is RenderPath.PRINT
-            and settings.exposure.render_intent != RenderIntent.FLAT
+            and (settings.exposure.contrast_mask_sky_only or settings.exposure.render_intent != RenderIntent.FLAT)
         ):
             mask_roi = context.active_roi
             bw_weights = plane_weights(settings.process, settings.exposure)
             mask_key = (source_hash, calculate_config_hash(base_key), mask_roi, current_img.shape[:2], bw_weights)
+            normalized_mask_input = None
             if self._mask_plane is None or self._mask_plane[0] != mask_key:
-                plane, centre = contrast_mask_plane(
+                plane, centre, normalized_mask_input = contrast_mask_plane_with_input(
                     img,
                     mask_bounds,
                     effective_crosstalk_matrix(settings.process, settings.process.process_mode),
@@ -286,30 +287,58 @@ class DarkroomEngine:
                 # and only the coefficients move with it.
                 expanded = expand_mask_plane(plane, current_img.shape[:2], mask_roi)
                 self._mask_plane = None if expanded is None else (mask_key, expanded, centre)
+            elif settings.exposure.contrast_mask_sky_only:
+                _, _, normalized_mask_input = contrast_mask_plane_with_input(
+                    img,
+                    mask_bounds,
+                    effective_crosstalk_matrix(settings.process, settings.process_mode),
+                    roi_norm=normalized_roi(mask_roi, current_img.shape[:2]),
+                    bw_weights=bw_weights,
+                    **geometry_kwargs(settings.geometry, distortion_k1),
+                )
             if self._mask_plane is not None:
                 context.metrics["contrast_mask_plane"] = self._mask_plane[1]
                 context.metrics["contrast_mask_centre"] = self._mask_plane[2]
                 context.metrics["contrast_mask_roi"] = None
-            if settings.exposure.contrast_mask_split_matte:
-                matte_key = (
-                    source_hash,
-                    calculate_config_hash(base_key),
-                    mask_roi,
-                    current_img.shape[:2],
-                    settings.exposure.contrast_mask_matte_area,
+            matte_key = (
+                source_hash,
+                calculate_config_hash(base_key),
+                mask_roi,
+                current_img.shape[:2],
+                settings.exposure.contrast_mask_sky_only,
+            )
+            if self._mask_matte is None or self._mask_matte[0][:5] != matte_key:
+                matte, matte_ready = contrast_mask_matte_plane_with_status(
+                    img,
+                    mask_bounds,
+                    effective_crosstalk_matrix(settings.process, settings.process.process_mode),
+                    settings.exposure.contrast_mask_sky_only,
+                    roi_norm=normalized_roi(mask_roi, current_img.shape[:2]),
+                    normalized_log=normalized_mask_input,
+                    wait=context.wait_for_sky_matte,
+                    identity=(source_hash, base_key, mask_roi),
+                    on_status=(
+                        lambda matte_status,
+                        error,
+                        cache_identity=source_hash,
+                        cache_config=settings,
+                        status=context.sky_matte_status: status(cache_identity, cache_config, matte_status, error)
+                        if status is not None
+                        else None
+                    ),
+                    **geometry_kwargs(settings.geometry, distortion_k1),
                 )
-                if self._mask_matte is None or self._mask_matte[0] != matte_key:
-                    matte = contrast_mask_matte_plane(
-                        img,
-                        settings.exposure.contrast_mask_matte_area,
-                        roi_norm=normalized_roi(mask_roi, current_img.shape[:2]),
-                        **geometry_kwargs(settings.geometry, distortion_k1),
-                    )
-                    expanded_matte = expand_mask_plane(matte, current_img.shape[:2], mask_roi)
-                    self._mask_matte = None if expanded_matte is None else (matte_key, expanded_matte)
-                    logger.debug(f"contrast_mask_matte_plane() returned matte {expanded_matte.shape[1]}x{expanded_matte.shape[0]}")
-                if self._mask_matte is not None:
-                    context.metrics["contrast_mask_matte"] = self._mask_matte[1]
+                expanded_matte = expand_mask_plane(matte, current_img.shape[:2], mask_roi)
+                ready_key = (*matte_key, matte_ready)
+                if matte_ready:
+                    self._mask_matte = None if expanded_matte is None else (ready_key, expanded_matte)
+                else:
+                    self._mask_matte = None
+                    context.metrics["contrast_mask_matte"] = expanded_matte
+            if self._mask_matte is not None:
+                context.metrics["contrast_mask_matte"] = self._mask_matte[1]
+                if context.sky_matte_status is not None:
+                    context.sky_matte_status(source_hash, settings, "done", None)
 
         timing.lap("contrast mask")
 

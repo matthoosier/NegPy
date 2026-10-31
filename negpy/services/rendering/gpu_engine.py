@@ -3,7 +3,7 @@ import math
 import os
 import struct
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import negpy_core
 import numpy as np
@@ -25,8 +25,8 @@ from negpy.features.exposure.normalization import (
     LogNegativeBounds,
     analyze_log_exposure_bounds_from_log,
     blend_neutral_axis,
-    contrast_mask_matte_plane,
-    contrast_mask_plane,
+    contrast_mask_matte_plane_with_status,
+    contrast_mask_plane_with_input,
     diffusion_grid,
     diffusion_plane,
     geometry_kwargs,
@@ -698,6 +698,8 @@ class GPUEngine:
         # Crop tool preview: toning and finish span the whole rotated frame, with no border or
         # carrier; the meter, contrast mask and active_roi stay on the crop, as in the CPU engine.
         full_frame: bool = False,
+        wait_for_sky_matte: bool = False,
+        sky_matte_status: Optional[Callable[[str, WorkspaceConfig, str, Optional[Exception]], None]] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         """
         Executes the full pipeline, returning a GPU texture and associated metrics.
@@ -1003,7 +1005,9 @@ class GPUEngine:
         mask_rect = None
         matte_plane = None
         matte_rect = None
-        if settings.exposure.contrast_mask_strength > 0.0 and render_path(settings.process) is RenderPath.PRINT:
+        if (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only) and render_path(
+            settings.process
+        ) is RenderPath.PRINT:
             if tiling_mode:
                 # A tile holds no pre-geometry source, so the caller builds the plane once
                 # for the whole export and the frame shifts into tile coords here.
@@ -1011,11 +1015,11 @@ class GPUEngine:
                     mask_plane, mask_centre, frame = contrast_mask_override
                     mask_key = ("tiled",)
                     mask_rect = (frame[0] - global_offset[0], frame[1] - global_offset[1], frame[2], frame[3])
-                if settings.exposure.contrast_mask_split_matte and contrast_matte_override is not None:
+                if settings.exposure.contrast_mask_sky_only and contrast_matte_override is not None:
                     matte_plane, frame = contrast_matte_override
-                    matte_key = ("tiled", settings.exposure.contrast_mask_matte_area)
+                    matte_key = ("tiled",)
                     matte_rect = (frame[0] - global_offset[0], frame[1] - global_offset[1], frame[2], frame[3])
-                elif settings.exposure.contrast_mask_split_matte:
+                elif settings.exposure.contrast_mask_sky_only:
                     raise RuntimeError("Tiled Contrast Mask matte is missing its full-frame coverage plane")
             else:
                 geo = settings.geometry
@@ -1038,42 +1042,71 @@ class GPUEngine:
                     bw_weights,
                 )
                 if self._mask_plane is None or self._mask_plane[0] != mask_key:
+                    plane, centre, normalized_mask_input = contrast_mask_plane_with_input(
+                        img,
+                        bounds,
+                        unmix_m,
+                        roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                        bw_weights=bw_weights,
+                        **geometry_kwargs(settings.geometry, k1_eff),
+                    )
                     self._mask_plane = (
                         mask_key,
-                        *contrast_mask_plane(
-                            img,
-                            bounds,
-                            unmix_m,
-                            roi_norm=normalized_roi(roi, (h_rot, w_rot)),
-                            bw_weights=bw_weights,
-                            **geometry_kwargs(settings.geometry, k1_eff),
-                        ),
+                        plane,
+                        centre,
                     )
+                else:
+                    normalized_mask_input = None
                 mask_plane = self._mask_plane[1]
                 mask_centre = self._mask_plane[2]
                 mask_rect = frame_rect
-                if settings.exposure.contrast_mask_split_matte:
-                    matte_key = (
-                        analysis_key,
-                        roi,
-                        (h_rot, w_rot),
-                        geometry_key,
-                        settings.exposure.contrast_mask_matte_area,
+                matte_base_key = (
+                    analysis_key,
+                    bounds,
+                    roi,
+                    (h_rot, w_rot),
+                    geometry_key,
+                    settings.exposure.contrast_mask_sky_only,
+                )
+                pending_matte = settings.exposure.contrast_mask_sky_only and not wait_for_sky_matte
+                if normalized_mask_input is None and settings.exposure.contrast_mask_sky_only:
+                    _, _, normalized_mask_input = contrast_mask_plane_with_input(
+                        img,
+                        bounds,
+                        unmix_m,
+                        roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                        bw_weights=bw_weights,
+                        **geometry_kwargs(settings.geometry, k1_eff),
                     )
-                    if self._matte_plane is None or self._matte_plane[0] != matte_key:
-                        self._matte_plane = (
-                            matte_key,
-                            contrast_mask_matte_plane(
-                                img,
-                                settings.exposure.contrast_mask_matte_area,
-                                roi_norm=normalized_roi(roi, (h_rot, w_rot)),
-                                **geometry_kwargs(settings.geometry, k1_eff),
-                            ),
-                        )
-                        logger.debug(f"contrast_mask_matte_plane() returned matte {self._matte_plane[1].shape[1]}x{self._matte_plane[1].shape[0]}")
-                    matte_plane = self._matte_plane[1]
+                if pending_matte or self._matte_plane is None or self._matte_plane[0][:6] != matte_base_key:
+                    matte_plane, matte_ready = contrast_mask_matte_plane_with_status(
+                        img,
+                        bounds,
+                        unmix_m,
+                        settings.exposure.contrast_mask_sky_only,
+                        roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                        normalized_log=normalized_mask_input,
+                        wait=wait_for_sky_matte,
+                        identity=(analysis_key, bounds, geometry_key, roi),
+                        on_status=(
+                            lambda matte_status,
+                            error,
+                            cache_identity=source_hash or analysis_key,
+                            cache_config=settings,
+                            status=sky_matte_status: status(cache_identity, cache_config, matte_status, error)
+                            if status is not None
+                            else None
+                        ),
+                        **geometry_kwargs(settings.geometry, k1_eff),
+                    )
+                    matte_key = (*matte_base_key, matte_ready)
+                    self._matte_plane = (matte_key, matte_plane)
+                else:
                     matte_key = self._matte_plane[0]
-                    matte_rect = frame_rect
+                    matte_plane = self._matte_plane[1]
+                    if sky_matte_status is not None:
+                        sky_matte_status(source_hash or analysis_key, settings, "done", None)
+                matte_rect = frame_rect
 
         mask_uniform = None
         if mask_plane is not None and mask_rect is not None:
@@ -2350,7 +2383,7 @@ class GPUEngine:
             + struct.pack(
                 "ffff",
                 *collapse_weights(settings.process, exp),
-                1.0 if settings.exposure.contrast_mask_split_matte else 0.0,
+                1.0 if settings.exposure.contrast_mask_sky_only else 0.0,
             )
         )
 
@@ -2845,6 +2878,8 @@ class GPUEngine:
         render_size_ref: Optional[float] = None,
         film_base: Optional[tuple] = None,
         source_base_log: Any = NOT_READ,
+        wait_for_sky_matte: bool = False,
+        sky_matte_status: Optional[Callable[[str, WorkspaceConfig, str, Optional[Exception]], None]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """High-level processing entry point with automatic tiling."""
         self._init_resources()
@@ -2862,6 +2897,10 @@ class GPUEngine:
                 render_size_ref=render_size_ref,
                 film_base=film_base,
                 source_base_log=source_base_log,
+                source_hash=source_hash,
+                analysis_source_hash=analysis_source_hash,
+                wait_for_sky_matte=wait_for_sky_matte,
+                sky_matte_status=sky_matte_status,
             )
         tex_final, metrics = self.process_to_texture(
             img,
@@ -2876,6 +2915,8 @@ class GPUEngine:
             render_size_ref=render_size_ref,
             film_base=film_base,
             source_base_log=source_base_log,
+            wait_for_sky_matte=wait_for_sky_matte,
+            sky_matte_status=sky_matte_status,
         )
         out = self._readback_downsampled(tex_final)
         timing.lap("GPU wait/readback")
@@ -2894,6 +2935,10 @@ class GPUEngine:
         memory_bounded: bool = False,
         render_size_ref: Optional[float] = None,
         source_base_log: Any = NOT_READ,
+        source_hash: Optional[str] = None,
+        analysis_source_hash: Optional[str] = None,
+        wait_for_sky_matte: bool = False,
+        sky_matte_status: Optional[Callable[[str, WorkspaceConfig, str, Optional[Exception]], None]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Processes ultra-high resolution images using memory-efficient tiling."""
         h, w = img.shape[:2]
@@ -3090,33 +3135,45 @@ class GPUEngine:
             global_highlight_point = measure_highlight_point_from_log(_meter_grid(), meter_bounds, None, 0.0)
 
         global_mask = None
-        if settings.exposure.contrast_mask_strength > 0.0 and render_path(settings.process) is RenderPath.PRINT:
-            global_mask = (
-                *contrast_mask_plane(
-                    img,
-                    global_bounds,
-                    unmix_m,
-                    roi_norm=normalized_roi(roi, (h_rot, w_rot)),
-                    bw_weights=plane_weights(settings.process, settings.exposure),
-                    **geometry_kwargs(settings.geometry, k1_eff),
-                ),
-                (x1, y1, crop_w, crop_h),
+        normalized_mask_input = None
+        if (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only) and render_path(
+            settings.process
+        ) is RenderPath.PRINT:
+            plane, centre, normalized_mask_input = contrast_mask_plane_with_input(
+                img,
+                global_bounds,
+                unmix_m,
+                roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                bw_weights=plane_weights(settings.process, settings.exposure),
+                **geometry_kwargs(settings.geometry, k1_eff),
             )
+            global_mask = (plane, centre, (x1, y1, crop_w, crop_h))
             # One plane serves every tile; the first upload wins.
             self._mask_tex_key = None
         global_matte = None
-        if (
-            settings.exposure.contrast_mask_strength > 0.0
-            and settings.exposure.contrast_mask_split_matte
-            and render_path(settings.process) is RenderPath.PRINT
-        ):
-            global_matte = (
-                contrast_mask_matte_plane(
-                    img,
-                    settings.exposure.contrast_mask_matte_area,
-                    roi_norm=normalized_roi(roi, (h_rot, w_rot)),
-                    **geometry_kwargs(settings.geometry, k1_eff),
+        if (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only) and render_path(
+            settings.process
+        ) is RenderPath.PRINT:
+            matte, _ = contrast_mask_matte_plane_with_status(
+                img,
+                global_bounds,
+                unmix_m,
+                settings.exposure.contrast_mask_sky_only,
+                roi_norm=normalized_roi(roi, (h_rot, w_rot)),
+                normalized_log=normalized_mask_input,
+                wait=wait_for_sky_matte,
+                identity=(analysis_source_hash or source_hash, global_bounds, settings.geometry, roi),
+                on_status=(
+                    lambda matte_status,
+                    error,
+                    cache_identity=analysis_source_hash or source_hash or "",
+                    cache_config=settings,
+                    status=sky_matte_status: status(cache_identity, cache_config, matte_status, error) if status is not None else None
                 ),
+                **geometry_kwargs(settings.geometry, k1_eff),
+            )
+            global_matte = (
+                matte,
                 (x1, y1, crop_w, crop_h),
             )
             logger.debug(f"contrast_mask_matte_plane() returned matte {global_matte[0].shape[1]}x{global_matte[0].shape[0]}")

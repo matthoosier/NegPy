@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import threading
 import urllib.request
+import hashlib
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Optional
 
 import cv2
@@ -33,6 +36,13 @@ _STD = np.array((0.229, 0.224, 0.225), dtype=np.float32)
 _USER_AGENT = f"NegPy/{get_app_version()} (+https://github.com/marcinz606/NegPy)"
 _CHUNK_SIZE = 256 * 1024
 _DOWNLOAD_LOCK = threading.Lock()
+_MATTE_CACHE_VERSION = 1
+_MATTE_CACHE_LOCK = threading.Lock()
+_MATTE_CACHE_MEMORY: OrderedDict[str, np.ndarray] = OrderedDict()
+_MATTE_CACHE_LIMIT = 8
+_MATTE_FUTURES: dict[str, tuple[Future[np.ndarray], list[Callable[[str, Optional[Exception]], None]]]] = {}
+_MATTE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sky-matte")
+_MATTE_MODEL = None
 
 
 class SkyMatteError(RuntimeError):
@@ -233,54 +243,124 @@ def rough_positive_proxy(normalized_log: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.clip(1.0 - normalized_log[:, :, :3], 0.0, 1.0), dtype=np.float32)
 
 
-def _harmonize_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    if final_positive.ndim != 2 or rough_positive.ndim != 2:
-        raise SkyMatteError("Sky mattes must be grayscale images.")
-    if not np.isfinite(final_positive).all() or not np.isfinite(rough_positive).all():
-        raise SkyMatteError("Sky mattes must contain finite values.")
-    if final_positive.shape == rough_positive.shape:
-        return final_positive, rough_positive
-    if final_positive.size < rough_positive.size:
-        final_positive = cv2.resize(
-            final_positive,
-            (rough_positive.shape[1], rough_positive.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
+def sky_matte_cache_key(image_rgb: np.ndarray, identity: object = None) -> str:
+    """Key the derived matte by the exact guide pixels and all output-affecting versions."""
+    image = np.ascontiguousarray(image_rgb, dtype=np.float32)
+    digest = hashlib.sha256()
+    digest.update(str((_MATTE_CACHE_VERSION, MODEL_VERSION, GUIDED_FILTER_RADIUS, GUIDED_FILTER_EPSILON)).encode())
+    digest.update(repr(identity).encode())
+    digest.update(repr((image.shape, image.dtype.str)).encode())
+    digest.update(memoryview(image).cast("B"))
+    return digest.hexdigest()
+
+
+def _matte_path(key: str) -> str:
+    return os.path.join(APP_CONFIG.cache_dir, "sky_matte", "mattes", str(_MATTE_CACHE_VERSION), f"{key}.npy")
+
+
+def _remember_matte(key: str, matte: np.ndarray) -> np.ndarray:
+    result = np.ascontiguousarray(matte, dtype=np.float32)
+    with _MATTE_CACHE_LOCK:
+        _MATTE_CACHE_MEMORY[key] = result
+        _MATTE_CACHE_MEMORY.move_to_end(key)
+        while len(_MATTE_CACHE_MEMORY) > _MATTE_CACHE_LIMIT:
+            _MATTE_CACHE_MEMORY.popitem(last=False)
+    return result
+
+
+def load_cached_sky_matte(key: str, shape: tuple[int, int]) -> Optional[np.ndarray]:
+    """Load a validated matte from memory or the disposable application cache."""
+    with _MATTE_CACHE_LOCK:
+        matte = _MATTE_CACHE_MEMORY.get(key)
+        if matte is not None:
+            _MATTE_CACHE_MEMORY.move_to_end(key)
+            if matte.shape == shape and np.isfinite(matte).all():
+                return matte
+            _MATTE_CACHE_MEMORY.pop(key, None)
+
+    path = _matte_path(key)
+    try:
+        matte = np.load(path, allow_pickle=False)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.warning("Ignoring invalid cached sky matte %s", path, exc_info=True)
+        return None
+    if matte.dtype != np.float32 or matte.shape != shape or not np.isfinite(matte).all():
+        logger.warning("Ignoring incompatible cached sky matte %s", path)
+        return None
+    return _remember_matte(key, np.clip(matte, 0.0, 1.0))
+
+
+def _make_cached_sky_matte(key: str, image_rgb: np.ndarray) -> np.ndarray:
+    global _MATTE_MODEL
+    cached = load_cached_sky_matte(key, image_rgb.shape[:2])
+    if cached is not None:
+        return cached
+    if _MATTE_MODEL is None:
+        _MATTE_MODEL = SkyMatteModel()
+    matte = make_sky_matte(image_rgb, _MATTE_MODEL)
+    matte = _remember_matte(key, matte)
+    path = _matte_path(key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = f"{path}.{threading.get_ident()}.part"
+    try:
+        with open(temporary, "wb") as output:
+            np.save(output, matte, allow_pickle=False)
+        os.replace(temporary, path)
+    except OSError:
+        _discard(temporary)
+        logger.exception("Could not save cached sky matte %s", path)
+    return matte
+
+
+def get_sky_matte(
+    image_rgb: np.ndarray,
+    key: str,
+    wait: bool,
+    on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
+) -> Optional[np.ndarray]:
+    """Return a cached matte, wait for one, or queue one background inference."""
+    image = np.ascontiguousarray(np.clip(image_rgb, 0.0, 1.0), dtype=np.float32)
+    cached = load_cached_sky_matte(key, image.shape[:2])
+    if cached is not None:
+        if on_status is not None:
+            on_status("done", None)
+        return cached
+    watch_future = False
+    with _MATTE_CACHE_LOCK:
+        pending = _MATTE_FUTURES.get(key)
+        if pending is None:
+            future = _MATTE_EXECUTOR.submit(_make_cached_sky_matte, key, image.copy())
+            callbacks = [on_status] if on_status is not None else []
+            _MATTE_FUTURES[key] = (future, callbacks)
+            pending = _MATTE_FUTURES[key]
+            watch_future = True
+        elif on_status is not None:
+            pending[1].append(on_status)
+        if on_status is not None:
+            on_status("calculating", None)
+    if watch_future:
+        pending[0].add_done_callback(lambda completed, cache_key=key: _finish_sky_matte(cache_key, completed))
+    if not wait:
+        return None
+    return pending[0].result()
+
+
+def _finish_sky_matte(key: str, future: Future[np.ndarray]) -> None:
+    with _MATTE_CACHE_LOCK:
+        pending = _MATTE_FUTURES.pop(key, None)
+    if pending is None:
+        return
+    try:
+        future.result()
+    except Exception as exc:
+        logger.exception("Background sky matte generation failed")
+        for callback in pending[1]:
+            callback("failed", exc)
     else:
-        rough_positive = cv2.resize(
-            rough_positive,
-            (final_positive.shape[1], final_positive.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
-    return (
-        np.ascontiguousarray(final_positive, dtype=np.float32),
-        np.ascontiguousarray(rough_positive, dtype=np.float32),
-    )
-
-
-def compare_sky_mattes(final_positive: np.ndarray, rough_positive: np.ndarray) -> np.ndarray:
-    """Encode rough-positive alpha as red and final-positive alpha as green."""
-    final_positive, rough_positive = _harmonize_sky_mattes(final_positive, rough_positive)
-    comparison = np.zeros((*final_positive.shape, 3), dtype=np.float32)
-    comparison[:, :, 0] = np.clip(rough_positive, 0.0, 1.0)
-    comparison[:, :, 1] = np.clip(final_positive, 0.0, 1.0)
-    return comparison
-
-
-def make_sky_matte_comparison(
-    final_positive: np.ndarray,
-    normalized_log: np.ndarray,
-    model: SkyMatteModel,
-    is_cancelled: Optional[Callable[[], bool]] = None,
-    on_progress: Optional[Callable[[int, int], None]] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return final-positive matte, rough-positive matte, and their color comparison."""
-    final_matte = make_sky_matte(final_positive, model, is_cancelled, on_progress)
-    if is_cancelled is not None and is_cancelled():
-        raise SkyMatteError("Sky matte processing was canceled.")
-    rough_matte = make_sky_matte(rough_positive_proxy(normalized_log), model, is_cancelled, on_progress)
-    final_matte, rough_matte = _harmonize_sky_mattes(final_matte, rough_matte)
-    return final_matte, rough_matte, compare_sky_mattes(final_matte, rough_matte)
+        for callback in pending[1]:
+            callback("done", None)
 
 
 def _make_trimap(probability: np.ndarray) -> np.ndarray:

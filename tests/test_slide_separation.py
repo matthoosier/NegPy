@@ -34,7 +34,17 @@ TRANSFER = (
 METERS = {"auto_exposure", "auto_normalize_contrast"}
 # The paper model's own controls; the transfer curve has no paper to apply them to.
 PRINT_ONLY = (
-    {"contrast_mask_strength", "diffusion", "paper_dmin", "paper_black", "paper_profile", "preflash", "hold_black", "bw_filter"}
+    {
+        "contrast_mask_strength",
+        "contrast_mask_sky_only",
+        "diffusion",
+        "paper_dmin",
+        "paper_black",
+        "paper_profile",
+        "preflash",
+        "hold_black",
+        "bw_filter",
+    }
     | {n + t for n in ("grade",) for t in _TRIMS}
     | _with_trims("shadow_grade", "highlight_grade", "midtone_gamma")
 )

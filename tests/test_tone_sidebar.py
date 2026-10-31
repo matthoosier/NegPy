@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 from PyQt6.QtCore import Qt
 
+from negpy.desktop.controller import AppController
 from negpy.desktop.session import AppState
 from negpy.desktop.view.sidebar.tone import ToneSidebar
-from negpy.features.exposure.models import ContrastMaskArea
 from negpy.features.process.models import ProcessMode
 
 
@@ -131,32 +131,66 @@ def test_hold_black_rides_the_auto_menu_without_lighting_it(qapp):
     assert not sidebar.hold_black_action.isVisible()
 
 
-def test_split_matte_toggle_and_active_area_update_config(qapp):
+def test_sky_only_toggle_updates_config_and_sky_matte_action_stays_available(qapp):
     controller = MagicMock()
     controller.state = AppState()
     sidebar = ToneSidebar(controller)
 
-    assert sidebar.contrast_mask_matte_area_combo.currentData() == ContrastMaskArea.TOP
-    assert sidebar.contrast_mask_matte_area_row.isHidden()
-
-    sidebar.contrast_mask_split_matte_btn.setChecked(True)
-    assert not sidebar.contrast_mask_matte_area_row.isHidden()
-    assert controller.apply_config.call_args.args[0].exposure.contrast_mask_split_matte
-
-    sidebar.contrast_mask_matte_area_combo.setCurrentIndex(sidebar.contrast_mask_matte_area_combo.findData(ContrastMaskArea.RIGHT))
-    assert controller.apply_config.call_args.args[0].exposure.contrast_mask_matte_area == ContrastMaskArea.RIGHT
-
-
-def test_sky_matte_button_follows_split_matte_toggle(qapp):
-    controller = MagicMock()
-    controller.state = AppState()
-    sidebar = ToneSidebar(controller)
-
-    assert sidebar.show_sky_matte_btn.isHidden()
-    sidebar.contrast_mask_split_matte_btn.setChecked(True)
     assert not sidebar.show_sky_matte_btn.isHidden()
-    sidebar.contrast_mask_split_matte_btn.setChecked(False)
-    assert sidebar.show_sky_matte_btn.isHidden()
+    sidebar.contrast_mask_sky_only_btn.setChecked(True)
+    assert controller.apply_config.call_args.args[0].exposure.contrast_mask_sky_only
+    sidebar.contrast_mask_sky_only_btn.setChecked(False)
+    assert not controller.apply_config.call_args.args[0].exposure.contrast_mask_sky_only
+    assert not sidebar.show_sky_matte_btn.isHidden()
+    assert sidebar.sky_matte_status_label.isHidden()
+
+
+def test_sky_matte_status_caption_shows_progress_completion_and_failure(qapp):
+    controller = MagicMock()
+    controller.state = AppState()
+    controller.state.current_file_hash = "sky-frame"
+    controller.state.config = replace(
+        controller.state.config,
+        exposure=replace(controller.state.config.exposure, contrast_mask_sky_only=True),
+    )
+    sidebar = ToneSidebar(controller)
+
+    sidebar._on_sky_matte_status_changed("sky-frame", controller.state.config, "calculating", None)
+    assert sidebar.sky_matte_status_label.text() == "Calculating"
+    assert sidebar.sky_matte_status_label.property("hint") == "muted"
+    assert not sidebar.sky_matte_status_label.isHidden()
+
+    sidebar._on_sky_matte_status_changed("sky-frame", controller.state.config, "done", None)
+    assert sidebar.sky_matte_status_label.text() == "Done"
+    assert sidebar.sky_matte_status_label.property("hint") == "success"
+
+    sidebar._on_sky_matte_status_changed("sky-frame", controller.state.config, "failed", RuntimeError("model unavailable"))
+    assert sidebar.sky_matte_status_label.text() == "Failed (model unavailable)"
+    assert sidebar.sky_matte_status_label.property("hint") == "error"
+
+
+def test_sky_matte_failure_shows_reason_in_toast():
+    controller = MagicMock()
+    controller.state = AppState()
+    config = replace(
+        controller.state.config,
+        exposure=replace(controller.state.config.exposure, contrast_mask_sky_only=True),
+    )
+    controller.state.config = config
+    controller.state.current_file_hash = "sky-frame"
+    controller._sky_matte_pending_identity = ("sky-frame", config)
+
+    error = RuntimeError("model unavailable")
+    AppController._on_sky_matte_status(controller, "sky-frame", config, "failed", error)
+
+    emitted = controller.sky_matte_status_changed.emit.call_args.args
+    assert emitted[:3] == ("sky-frame", config, "failed")
+    assert emitted[3] is error
+    message, timeout, kind = controller.set_status.call_args.args
+    assert "model unavailable" in message
+    assert timeout > 0
+    assert kind == "error"
+    assert controller._sky_matte_pending_identity is None
 
 
 def test_show_sky_matte_keeps_different_source_sizes_after_cropping(qapp, monkeypatch):
@@ -166,28 +200,22 @@ def test_show_sky_matte_keeps_different_source_sizes_after_cropping(qapp, monkey
     controller.state = AppState()
     controller.state.current_file_hash = "sky-frame"
     config = controller.state.config
-    positive = np.full((6, 8, 3), 0.4, dtype=np.float32)
     normalized = np.arange(6 * 8 * 3, dtype=np.float32).reshape(6, 8, 3)
     controller.state.last_metrics = {
-        "base_positive": positive,
         "normalized_log": normalized,
-        "content_rect": (2, 1, 4, 3),
         "active_roi": (0, 5, 0, 7),
         "render_identity": ("sky-frame", config),
     }
     dialog = MagicMock()
     dialog_factory = MagicMock(return_value=dialog)
     monkeypatch.setattr(tone_module, "SkyMatteDialog", dialog_factory)
-    monkeypatch.setattr(tone_module, "apply_display_transform", lambda image, *_args: image)
     sidebar = ToneSidebar(controller)
 
     sidebar._show_sky_matte()
 
-    passed_positive, passed_normalized = dialog_factory.call_args.args[:2]
-    assert passed_positive.shape == (3, 4, 3)
-    assert passed_normalized.shape == (5, 7, 3)
-    np.testing.assert_allclose(passed_positive, 0.4)
-    np.testing.assert_array_equal(passed_normalized, normalized[:5, :7])
+    passed_positive = dialog_factory.call_args.args[0]
+    assert passed_positive.shape == (5, 7, 3)
+    np.testing.assert_array_equal(passed_positive, np.clip(1.0 - normalized[:5, :7], 0.0, 1.0))
     dialog.show.assert_called_once()
 
 
@@ -195,23 +223,16 @@ def test_show_sky_matte_keeps_different_source_sizes_after_cropping(qapp, monkey
     ("shape", "orientation"),
     (((8, 12), Qt.Orientation.Vertical), ((12, 8), Qt.Orientation.Horizontal)),
 )
-def test_sky_matte_dialog_displays_both_mattes_and_rgb_comparison(qapp, monkeypatch, shape, orientation):
+def test_sky_matte_dialog_displays_input_and_single_matte(qapp, monkeypatch, shape, orientation):
     from PyQt6.QtTest import QTest
     import negpy.desktop.view.widgets.sky_matte_dialog as dialog_module
 
-    def make_comparison(_positive, normalized, *_args):
-        height, width = normalized.shape[:2]
-        matte_shape = (height // 2, width // 2)
-        final = np.full(matte_shape, 0.75, dtype=np.float32)
-        rough = np.full(matte_shape, 0.25, dtype=np.float32)
-        comparison = np.zeros((*matte_shape, 3), dtype=np.float32)
-        comparison[:, :, 0] = rough
-        comparison[:, :, 1] = final
-        return final, rough, comparison
+    def make_matte(positive, *_args):
+        height, width = positive.shape[:2]
+        return np.full((height // 2, width // 2), 0.75, dtype=np.float32)
 
-    monkeypatch.setattr(dialog_module, "make_sky_matte_comparison", make_comparison)
+    monkeypatch.setattr(dialog_module, "make_sky_matte", make_matte)
     dialog = dialog_module.SkyMatteDialog(
-        np.full((*shape, 3), 0.5, dtype=np.float32),
         np.full((*shape, 3), 0.5, dtype=np.float32),
         lambda: True,
     )
@@ -225,17 +246,14 @@ def test_sky_matte_dialog_displays_both_mattes_and_rgb_comparison(qapp, monkeypa
         QTest.qWait(10)
 
     assert all(pixmap is not None and not pixmap.isNull() for pixmap in pixmaps)
-    final_pixel = pixmaps[0].toImage().pixelColor(pixmaps[0].width() // 2, pixmaps[0].height() // 2)
-    rough_pixel = pixmaps[1].toImage().pixelColor(pixmaps[1].width() // 2, pixmaps[1].height() // 2)
-    overlap_pixel = pixmaps[2].toImage().pixelColor(pixmaps[2].width() // 2, pixmaps[2].height() // 2)
-    assert final_pixel.red() == 0 and final_pixel.green() == 191 and final_pixel.blue() == 0
-    assert rough_pixel.red() == 64 and rough_pixel.green() == 0 and rough_pixel.blue() == 0
-    assert overlap_pixel.red() == 64 and overlap_pixel.green() == 191 and overlap_pixel.blue() == 0
-    expected_dimensions = f"Input image: {shape[1]} × {shape[0]}\nMatte: {shape[1] // 2} × {shape[0] // 2}"
-    assert dialog.detail_labels[0].text() == expected_dimensions
-    assert dialog.detail_labels[1].text() == expected_dimensions
+    input_pixel = pixmaps[0].toImage().pixelColor(pixmaps[0].width() // 2, pixmaps[0].height() // 2)
+    matte_pixel = pixmaps[1].toImage().pixelColor(pixmaps[1].width() // 2, pixmaps[1].height() // 2)
+    assert input_pixel.red() == 128 and input_pixel.green() == 128 and input_pixel.blue() == 128
+    assert matte_pixel.red() == 191 and matte_pixel.green() == 191 and matte_pixel.blue() == 191
+    assert dialog.detail_labels[0].text() == f"Input image: {shape[1]} × {shape[0]}"
+    assert dialog.detail_labels[1].text() == f"Matte: {shape[1] // 2} × {shape[0] // 2}"
     assert dialog._panel_orientation == orientation
-    assert dialog.status.text() == "Green shows final-positive coverage. Red shows rough-positive coverage. Yellow shows overlap."
+    assert dialog.status.text() == "The matte marks the detected sky."
     dialog.close()
     qapp.processEvents()
 

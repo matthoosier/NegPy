@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, Tuple
 
 import negpy_core
 import numpy as np
@@ -557,6 +557,39 @@ def analysis_grid(
     return image
 
 
+def contrast_mask_plane_with_input(
+    image: ImageBuffer,
+    bounds: LogNegativeBounds,
+    unmix: Optional[np.ndarray],
+    rotation: int = 0,
+    fine_rotation: float = 0.0,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+    distortion_k1: float = 0.0,
+    converge_v: float = 0.0,
+    converge_h: float = 0.0,
+    roi_norm: Optional[Tuple[float, float, float, float]] = None,
+    bw_weights: Optional[Tuple[float, float, float]] = None,
+) -> Tuple[np.ndarray, float, np.ndarray]:
+    """Return the Contrast Mask plane, centre, and shared normalized analysis input."""
+    logger.debug(f"contrast_mask_plane(): input image is {image.shape[1]}x{image.shape[0]}")
+    image = analysis_grid(image, rotation, fine_rotation, flip_horizontal, flip_vertical, distortion_k1, converge_v, converge_h, roi_norm)
+    logger.debug(f"contrast_mask_plane(): analysis grid image is {image.shape[1]}x{image.shape[0]}")
+
+    # A frame that never metered normalizes to huge values; no stretch, no mask.
+    if luminance_density_range(bounds) < 1e-6:
+        empty = np.zeros(image.shape, dtype=np.float32)
+        return np.zeros(image.shape[:2], dtype=np.float32), 0.5, empty
+
+    val = normalize_log_image(unmix_log_image(prefilter_log_grid(image, None, 0.0), unmix), bounds)
+    analysis_val = np.ascontiguousarray(val, dtype=np.float32)
+    if bw_weights is not None:
+        val = negpy_core.matmul_3x3(np.ascontiguousarray(val, dtype=np.float32), collapse_matrix(bw_weights))
+    sigma = MASK_BLUR_PERCENT * 0.01 * min(val.shape[:2])
+    plane, centre = negpy_core.contrast_mask_tail(np.ascontiguousarray(val, dtype=np.float32), sigma)
+    return plane, float(centre), analysis_val
+
+
 def contrast_mask_plane(
     image: ImageBuffer,
     bounds: LogNegativeBounds,
@@ -571,27 +604,29 @@ def contrast_mask_plane(
     roi_norm: Optional[Tuple[float, float, float, float]] = None,
     bw_weights: Optional[Tuple[float, float, float]] = None,
 ) -> Tuple[np.ndarray, float]:
-    """The zero-mean blurred luma plane the Contrast Mask reads, on `analysis_grid`, plus the val it was
-    centred on. `bw_weights` collapses the val first, as a B&W print does the pixel."""
-    logger.debug(f"contrast_mask_plane(): input image is {image.shape[1]}x{image.shape[0]}")
-    image = analysis_grid(image, rotation, fine_rotation, flip_horizontal, flip_vertical, distortion_k1, converge_v, converge_h, roi_norm)
-    logger.debug(f"contrast_mask_plane(): analysis grid image is {image.shape[1]}x{image.shape[0]}")
+    """The zero-mean blurred luma plane the Contrast Mask reads, on `analysis_grid`, plus its centre."""
+    plane, centre, _ = contrast_mask_plane_with_input(
+        image,
+        bounds,
+        unmix,
+        rotation,
+        fine_rotation,
+        flip_horizontal,
+        flip_vertical,
+        distortion_k1,
+        converge_v,
+        converge_h,
+        roi_norm,
+        bw_weights,
+    )
+    return plane, centre
 
-    # A frame that never metered normalizes to huge values; no stretch, no mask.
-    if luminance_density_range(bounds) < 1e-6:
-        return np.zeros(image.shape[:2], dtype=np.float32), 0.5
 
-    val = normalize_log_image(unmix_log_image(prefilter_log_grid(image, None, 0.0), unmix), bounds)
-    if bw_weights is not None:
-        val = negpy_core.matmul_3x3(np.ascontiguousarray(val, dtype=np.float32), collapse_matrix(bw_weights))
-    sigma = MASK_BLUR_PERCENT * 0.01 * min(val.shape[:2])
-    plane, centre = negpy_core.contrast_mask_tail(np.ascontiguousarray(val, dtype=np.float32), sigma)
-    return plane, float(centre)
-
-
-def contrast_mask_matte_plane(
+def contrast_mask_matte_plane_with_status(
     image: ImageBuffer,
-    area: str,
+    bounds: LogNegativeBounds,
+    unmix: Optional[np.ndarray],
+    enabled: bool,
     rotation: int = 0,
     fine_rotation: float = 0.0,
     flip_horizontal: bool = False,
@@ -600,21 +635,109 @@ def contrast_mask_matte_plane(
     converge_v: float = 0.0,
     converge_h: float = 0.0,
     roi_norm: Optional[Tuple[float, float, float, float]] = None,
+    normalized_log: Optional[np.ndarray] = None,
+    wait: bool = False,
+    identity: object = None,
+    on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
+) -> Tuple[np.ndarray, bool]:
+    """Return sky coverage on the Contrast Mask analysis grid and whether it is ready."""
+    shape = _analysis_grid_shape(
+        image.shape[:2],
+        rotation,
+        fine_rotation,
+        flip_horizontal,
+        flip_vertical,
+        roi_norm,
+    )
+    if not enabled or luminance_density_range(bounds) < 1e-6:
+        return np.ones(shape, dtype=np.float32), True
+
+    if normalized_log is None:
+        _, _, normalized_log = contrast_mask_plane_with_input(
+            image,
+            bounds,
+            unmix,
+            rotation,
+            fine_rotation,
+            flip_horizontal,
+            flip_vertical,
+            distortion_k1,
+            converge_v,
+            converge_h,
+            roi_norm,
+        )
+    from negpy.services.assets.sky_matte import get_sky_matte, rough_positive_proxy, sky_matte_cache_key
+
+    positive = rough_positive_proxy(normalized_log)
+    key = sky_matte_cache_key(positive, identity)
+    matte = get_sky_matte(positive, key, wait, on_status)
+    return (np.ones(shape, dtype=np.float32), False) if matte is None else (matte, True)
+
+
+def contrast_mask_matte_plane(
+    image: ImageBuffer,
+    bounds: LogNegativeBounds,
+    unmix: Optional[np.ndarray],
+    enabled: bool,
+    rotation: int = 0,
+    fine_rotation: float = 0.0,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
+    distortion_k1: float = 0.0,
+    converge_v: float = 0.0,
+    converge_h: float = 0.0,
+    roi_norm: Optional[Tuple[float, float, float, float]] = None,
+    normalized_log: Optional[np.ndarray] = None,
+    wait: bool = False,
+    identity: object = None,
+    on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
 ) -> np.ndarray:
-    """Coverage for one raw-scan half, transformed and cropped on the analysis grid."""
-    h, w = image.shape[:2]
-    matte = np.zeros((h, w), dtype=np.float32)
-    if area == "top":
-        matte[: h // 2, :] = 1.0
-    elif area == "bottom":
-        matte[h // 2 :, :] = 1.0
-    elif area == "left":
-        matte[:, : w // 2] = 1.0
-    elif area == "right":
-        matte[:, w // 2 :] = 1.0
-    else:
-        raise ValueError(f"Unknown Contrast Mask matte area: {area}")
-    return analysis_grid(matte, rotation, fine_rotation, flip_horizontal, flip_vertical, distortion_k1, converge_v, converge_h, roi_norm)
+    """Generate sky coverage for the Contrast Mask, or full coverage when disabled."""
+    matte, _ = contrast_mask_matte_plane_with_status(
+        image,
+        bounds,
+        unmix,
+        enabled,
+        rotation,
+        fine_rotation,
+        flip_horizontal,
+        flip_vertical,
+        distortion_k1,
+        converge_v,
+        converge_h,
+        roi_norm,
+        normalized_log,
+        wait,
+        identity,
+        on_status,
+    )
+    return matte
+
+
+def _analysis_grid_shape(
+    image_shape: Tuple[int, int],
+    rotation: int,
+    fine_rotation: float,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    roi_norm: Optional[Tuple[float, float, float, float]],
+) -> Tuple[int, int]:
+    from negpy.features.exposure.models import EXPOSURE_CONSTANTS
+
+    h, w = image_shape
+    grid = int(EXPOSURE_CONSTANTS["analysis_grid"])
+    if max(h, w) > grid:
+        scale = grid / float(max(h, w))
+        w, h = max(1, round(w * scale)), max(1, round(h * scale))
+    if rotation % 2:
+        h, w = w, h
+    if roi_norm is not None:
+        y1 = max(0, min(h - 1, int(round(roi_norm[0] * h))))
+        y2 = max(y1 + 1, min(h, int(round(roi_norm[1] * h))))
+        x1 = max(0, min(w - 1, int(round(roi_norm[2] * w))))
+        x2 = max(x1 + 1, min(w, int(round(roi_norm[3] * w))))
+        h, w = y2 - y1, x2 - x1
+    return h, w
 
 
 def diffusion_grid(

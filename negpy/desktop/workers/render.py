@@ -355,12 +355,14 @@ class RenderWorker(QObject):
     strip_progress = pyqtSignal(int, int)  # (patches printed, total)
     pick_better_finished = pyqtSignal(object, object, object)  # (current, left, right ndarrays)
     busy = pyqtSignal(str)  # a slow uncached pipeline step is starting
+    sky_matte_status = pyqtSignal(str, object, str, object)
     error = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self._processor = ImageProcessor()
         self._processor.on_slow_step = self.busy.emit
+        self._processor.on_sky_matte_status = self.sky_matte_status.emit
 
     @property
     def processor(self) -> ImageProcessor:

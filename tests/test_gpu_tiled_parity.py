@@ -6,6 +6,7 @@ tiles, so a setting the replay forgets is dropped from exports only.
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -91,8 +92,8 @@ class TestGpuTiledParity(unittest.TestCase):
         self.assertGreater(diff, 0.01, "Contrast Mask did nothing to the tiled export")
         self._assert_parity(settings, "Tiled export dropped the Contrast Mask")
 
-    def test_tiled_applies_split_matte(self):
-        from negpy.features.exposure.models import ContrastMaskArea
+    def test_tiled_applies_sky_matte(self):
+        from negpy.services.assets import sky_matte
 
         base = _base()
         hard = replace(base, exposure=replace(base.exposure, grade=40.0, contrast_mask_strength=1.0))
@@ -100,12 +101,16 @@ class TestGpuTiledParity(unittest.TestCase):
             hard,
             exposure=replace(
                 hard.exposure,
-                contrast_mask_split_matte=True,
-                contrast_mask_matte_area=ContrastMaskArea.LEFT,
+                contrast_mask_sky_only=True,
             ),
         )
-        self.assertGreater(float(np.abs(self._tiled(settings) - self._tiled(hard)).mean()), 1e-4)
-        self._assert_parity(settings, "Tiled export misplaced the Contrast Mask matte", tol=0.001)
+        with patch.object(
+            sky_matte,
+            "get_sky_matte",
+            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+        ):
+            self.assertGreater(float(np.abs(self._tiled(settings) - self._tiled(hard)).mean()), 1e-4)
+            self._assert_parity(settings, "Tiled export misplaced the Contrast Mask matte", tol=0.001)
 
     def test_tiled_applies_sabattier(self):
         """The Mackie-line blur is the alt stage's one spatial term: the halo must cover it."""
