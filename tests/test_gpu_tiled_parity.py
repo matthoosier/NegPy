@@ -51,7 +51,7 @@ class TestGpuTiledParity(unittest.TestCase):
         self.engine.destroy_all()
 
     def _tiled(self, settings) -> np.ndarray:
-        res, _ = self.engine._process_tiled(self.img, settings, scale_factor=1.0)
+        res, _ = self.engine._process_tiled(self.img, settings, scale_factor=1.0, wait_for_sky_matte=True)
         return res
 
     def _direct(self, settings) -> np.ndarray:
@@ -104,13 +104,21 @@ class TestGpuTiledParity(unittest.TestCase):
                 contrast_mask_sky_only=True,
             ),
         )
+        observed = []
+
+        def fake_get_matte(image, _key, _wait, _on_status, **kwargs):
+            observed.append(kwargs["preview"])
+            return np.full(image.shape[:2], 0.5, dtype=np.float32)
+
         with patch.object(
             sky_matte,
             "get_sky_matte",
-            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+            side_effect=fake_get_matte,
         ):
             self.assertGreater(float(np.abs(self._tiled(settings) - self._tiled(hard)).mean()), 1e-4)
             self._assert_parity(settings, "Tiled export misplaced the Contrast Mask matte", tol=0.001)
+        self.assertTrue(observed)
+        self.assertEqual(observed[:2], [False, False])
 
     def test_tiled_applies_sabattier(self):
         """The Mackie-line blur is the alt stage's one spatial term: the halo must cover it."""

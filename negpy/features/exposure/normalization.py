@@ -639,6 +639,7 @@ def contrast_mask_matte_plane_with_status(
     wait: bool = False,
     identity: object = None,
     on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
+    preview: bool = True,
 ) -> Tuple[np.ndarray, bool]:
     """Return sky coverage on the Contrast Mask analysis grid and whether it is ready."""
     shape = _analysis_grid_shape(
@@ -670,7 +671,7 @@ def contrast_mask_matte_plane_with_status(
 
     positive = rough_positive_proxy(normalized_log)
     key = sky_matte_cache_key(positive, identity)
-    matte = get_sky_matte(positive, key, wait, on_status)
+    matte = get_sky_matte(positive, key, wait, on_status, preview=preview)
     return (np.ones(shape, dtype=np.float32), False) if matte is None else (matte, True)
 
 
@@ -691,6 +692,7 @@ def contrast_mask_matte_plane(
     wait: bool = False,
     identity: object = None,
     on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
+    preview: bool = True,
 ) -> np.ndarray:
     """Generate sky coverage for the Contrast Mask, or full coverage when disabled."""
     matte, _ = contrast_mask_matte_plane_with_status(
@@ -710,6 +712,7 @@ def contrast_mask_matte_plane(
         wait,
         identity,
         on_status,
+        preview,
     )
     return matte
 

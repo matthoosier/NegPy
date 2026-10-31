@@ -275,18 +275,21 @@ def test_sky_matte_cache_key_tracks_pixels_and_identity():
     assert sky_matte.sky_matte_cache_key(image, identity=("frame", 2)) != original
 
 
-def test_async_sky_matte_generation_is_single_flight_and_persists(monkeypatch, tmp_path):
-    from negpy.kernel.system.config import APP_CONFIG
-
-    monkeypatch.setattr(APP_CONFIG, "cache_dir", str(tmp_path))
+def test_async_sky_matte_generation_is_single_flight_and_memory_cached(monkeypatch):
+    monkeypatch.setattr(sky_matte, "purge_legacy_sky_matte_cache", lambda: None)
+    sky_matte.clear_sky_matte_preview_cache()
     image = np.full((8, 12, 3), 0.4, dtype=np.float32)
     key = sky_matte.sky_matte_cache_key(image, identity="async-cache-test")
     generated = []
     callbacks = []
     callbacks_done = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
 
     def fake_make_sky_matte(source, _model):
         generated.append(source.copy())
+        started.set()
+        assert release.wait(timeout=5.0)
         return np.full(source.shape[:2], 0.75, dtype=np.float32)
 
     def on_status(status, error):
@@ -296,15 +299,15 @@ def test_async_sky_matte_generation_is_single_flight_and_persists(monkeypatch, t
 
     monkeypatch.setattr(sky_matte, "make_sky_matte", fake_make_sky_matte)
     assert sky_matte.get_sky_matte(image, key, wait=False, on_status=on_status) is None
+    assert started.wait(timeout=5.0)
     assert sky_matte.get_sky_matte(image, key, wait=False, on_status=on_status) is None
+    release.set()
     assert callbacks_done.wait(timeout=5.0)
 
     assert len(generated) == 1
     assert callbacks.count(("calculating", None)) == 2
     assert callbacks.count(("done", None)) == 2
-    with sky_matte._MATTE_CACHE_LOCK:
-        sky_matte._MATTE_CACHE_MEMORY.pop(key, None)
-    cached = sky_matte.load_cached_sky_matte(key, image.shape[:2])
+    cached = sky_matte.get_sky_matte(image, key, wait=False)
     assert cached is not None
     np.testing.assert_array_equal(cached, 0.75)
     cache_events = []
@@ -312,7 +315,98 @@ def test_async_sky_matte_generation_is_single_flight_and_persists(monkeypatch, t
     assert cache_events == [("done", None)]
 
 
+def test_transient_export_matte_does_not_replace_preview_cache(monkeypatch, tmp_path):
+    from negpy.kernel.system.config import APP_CONFIG
+
+    monkeypatch.setattr(APP_CONFIG, "cache_dir", str(tmp_path))
+    monkeypatch.setattr(sky_matte, "_LEGACY_CACHE_CLEANUP_DONE", False)
+    sky_matte.clear_sky_matte_preview_cache()
+    image = np.full((8, 12, 3), 0.4, dtype=np.float32)
+    preview_key = sky_matte.sky_matte_cache_key(image, identity="preview")
+    export_key = sky_matte.sky_matte_cache_key(image, identity="export")
+    generated = []
+
+    def fake_make_sky_matte(source, _model):
+        generated.append(source.copy())
+        return np.full(source.shape[:2], len(generated) / 2, dtype=np.float32)
+
+    monkeypatch.setattr(sky_matte, "make_sky_matte", fake_make_sky_matte)
+    preview_matte = sky_matte.get_sky_matte(image, preview_key, wait=True, preview=True)
+    export_matte = sky_matte.get_sky_matte(image, export_key, wait=True, preview=False)
+
+    assert preview_matte is not None
+    assert export_matte is not None
+    np.testing.assert_array_equal(preview_matte, 0.5)
+    np.testing.assert_array_equal(export_matte, 1.0)
+    assert sky_matte.get_sky_matte(image, preview_key, wait=False, preview=True) is preview_matte
+    assert len(generated) == 2
+    assert not (tmp_path / "sky_matte" / "mattes").exists()
+
+    variant_key = sky_matte.sky_matte_cache_key(image, identity="preview-geometry-variant")
+    variant = sky_matte.get_sky_matte(image, variant_key, wait=True, preview=True)
+    assert variant is not None
+    assert sky_matte._MATTE_PREVIEW_KEY == variant_key
+    assert sky_matte._MATTE_PREVIEW_VALUE is variant
+
+
+def test_switching_preview_discards_inflight_result_and_callback(monkeypatch):
+    monkeypatch.setattr(sky_matte, "purge_legacy_sky_matte_cache", lambda: None)
+    sky_matte.clear_sky_matte_preview_cache()
+    image = np.full((8, 12, 3), 0.4, dtype=np.float32)
+    key = sky_matte.sky_matte_cache_key(image, identity="stale-preview")
+    started = threading.Event()
+    release = threading.Event()
+    completion_handled = threading.Event()
+    events = []
+
+    def blocking_make_sky_matte(source, _model):
+        started.set()
+        assert release.wait(timeout=5.0)
+        return np.full(source.shape[:2], 0.75, dtype=np.float32)
+
+    def on_status(status, error):
+        events.append((status, error))
+
+    monkeypatch.setattr(sky_matte, "make_sky_matte", blocking_make_sky_matte)
+    assert sky_matte.get_sky_matte(image, key, wait=False, on_status=on_status) is None
+    assert started.wait(timeout=5.0)
+    with sky_matte._MATTE_CACHE_LOCK:
+        future = sky_matte._MATTE_FUTURES[key].future
+    future.add_done_callback(lambda _future: completion_handled.set())
+    sky_matte.clear_sky_matte_preview_cache()
+    release.set()
+    assert completion_handled.wait(timeout=5.0)
+    assert events == [("calculating", None)]
+    assert sky_matte._MATTE_PREVIEW_KEY is None
+    assert sky_matte._MATTE_PREVIEW_VALUE is None
+
+
+def test_legacy_disk_mattes_are_removed_without_deleting_model_or_other_files(monkeypatch, tmp_path):
+    from negpy.kernel.system.config import APP_CONFIG
+
+    monkeypatch.setattr(APP_CONFIG, "cache_dir", str(tmp_path))
+    monkeypatch.setattr(sky_matte, "_LEGACY_CACHE_CLEANUP_DONE", False)
+    matte_dir = tmp_path / "sky_matte" / "mattes" / "1"
+    matte_dir.mkdir(parents=True)
+    legacy_matte = matte_dir / "old.npy"
+    legacy_matte.write_bytes(b"obsolete")
+    unrelated = matte_dir / "keep.txt"
+    unrelated.write_text("keep")
+    model_dir = tmp_path / "sky_matte" / sky_matte.MODEL_VERSION
+    model_dir.mkdir(parents=True)
+    model_file = model_dir / "model_quantized.onnx"
+    model_file.write_bytes(b"model")
+
+    sky_matte.purge_legacy_sky_matte_cache()
+
+    assert not legacy_matte.exists()
+    assert unrelated.exists()
+    assert model_file.exists()
+
+
 def test_async_sky_matte_failure_reports_the_original_exception(monkeypatch):
+    monkeypatch.setattr(sky_matte, "purge_legacy_sky_matte_cache", lambda: None)
+    sky_matte.clear_sky_matte_preview_cache()
     image = np.full((8, 12, 3), 0.4, dtype=np.float32)
     key = sky_matte.sky_matte_cache_key(image, identity="async-failure-test")
     failed = threading.Event()

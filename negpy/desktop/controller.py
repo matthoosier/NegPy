@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 from negpy.kernel.system.memory import available_system_memory_bytes
 from negpy.kernel.system.text import count_of, plural
 from negpy.kernel.image.logic import apply_exif_orientation, working_oetf_encode
+from negpy.services.assets.sky_matte import clear_sky_matte_preview_cache, purge_legacy_sky_matte_cache
 from negpy.desktop.auto_sliders import record_meters, shown_values
 from negpy.desktop.converters import ImageConverter
 from negpy.desktop.file_manager import move_to_trash
@@ -711,6 +712,8 @@ class AppController(QObject):
 
     def __init__(self, session_manager: DesktopSessionManager):
         super().__init__()
+        purge_legacy_sky_matte_cache()
+        clear_sky_matte_preview_cache()
         self.session = session_manager
         self.state: AppState = session_manager.state
         self._thumb_config: Optional[WorkspaceConfig] = None
@@ -1252,9 +1255,11 @@ class AppController(QObject):
         self.capture_worker.light_temp_polled.connect(self.light_temp_polled.emit)
 
         self.session.active_file_changing.connect(self._update_thumbnail_from_state)
+        self.session.active_file_changing.connect(clear_sky_matte_preview_cache)
         self.session.frame_previews_ending.connect(self._previewed_meter_cards.clear)
         self.session.session_emptied.connect(self._render_memo.clear)
         self.session.session_emptied.connect(self._strip_memo.clear)
+        self.session.session_emptied.connect(clear_sky_matte_preview_cache)
         self.session.file_selected.connect(self._on_file_selected_load)
         self.session.state_changed.connect(self.config_updated.emit)
         self.session.state_changed.connect(self._render_if_state_moved)

@@ -445,6 +445,7 @@ class GPUEngine:
         self._local_maps_cache: Optional[Tuple[Tuple, Optional[np.ndarray]]] = None
         self._mask_plane: Optional[Tuple[Tuple, np.ndarray, float]] = None
         self._matte_plane: Optional[Tuple[Tuple, np.ndarray]] = None
+        self._matte_stage_key: Optional[Tuple] = None
         self._diffusion_grid: Optional[Tuple[Tuple, np.ndarray]] = None
         self._diffusion_plane: Optional[Tuple[Tuple, Optional[np.ndarray]]] = None
         # Identity of the plane currently sitting in the contrast_mask texture.
@@ -580,6 +581,8 @@ class GPUEngine:
         self._current_source_hash = None
         self._last_settings = None
         self._local_ev_key = None
+        self._matte_plane = None
+        self._matte_stage_key = None
         self._mask_tex_key = None
         self._matte_tex_key = None
         self._sharpen_state_key = None
@@ -732,6 +735,9 @@ class GPUEngine:
         if source_hash is None or source_hash != self._current_source_hash:
             source_tex.upload(img)
             self._current_source_hash = source_hash
+            self._matte_plane = None
+            self._matte_stage_key = None
+            self._matte_tex_key = None
             start_stage = 0
         elif tiling_mode:
             start_stage = 0
@@ -1005,6 +1011,7 @@ class GPUEngine:
         mask_rect = None
         matte_plane = None
         matte_rect = None
+        matte_stage_key = None
         if (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only) and render_path(
             settings.process
         ) is RenderPath.PRINT:
@@ -1088,6 +1095,7 @@ class GPUEngine:
                         normalized_log=normalized_mask_input,
                         wait=wait_for_sky_matte,
                         identity=(analysis_key, bounds, geometry_key, roi),
+                        preview=not wait_for_sky_matte,
                         on_status=(
                             lambda matte_status,
                             error,
@@ -1100,13 +1108,17 @@ class GPUEngine:
                         **geometry_kwargs(settings.geometry, k1_eff),
                     )
                     matte_key = (*matte_base_key, matte_ready)
-                    self._matte_plane = (matte_key, matte_plane)
+                    self._matte_plane = None if wait_for_sky_matte else (matte_key, matte_plane)
                 else:
                     matte_key = self._matte_plane[0]
                     matte_plane = self._matte_plane[1]
                     if sky_matte_status is not None:
                         sky_matte_status(source_hash or analysis_key, settings, "done", None)
+                matte_stage_key = matte_key
                 matte_rect = frame_rect
+        if not wait_for_sky_matte and matte_stage_key != self._matte_stage_key:
+            start_stage = min(start_stage, 1)
+            self._matte_stage_key = matte_stage_key
 
         mask_uniform = None
         if mask_plane is not None and mask_rect is not None:
@@ -3004,6 +3016,8 @@ class GPUEngine:
                 apply_layout=False,
                 film_base=film_base,
                 source_base_log=source_base_log,
+                wait_for_sky_matte=wait_for_sky_matte,
+                sky_matte_status=sky_matte_status,
             )
 
         global_cdfs = self._readback_clahe_cdf()
@@ -3163,6 +3177,7 @@ class GPUEngine:
                 normalized_log=normalized_mask_input,
                 wait=wait_for_sky_matte,
                 identity=(analysis_source_hash or source_hash, global_bounds, settings.geometry, roi),
+                preview=not wait_for_sky_matte,
                 on_status=(
                     lambda matte_status,
                     error,

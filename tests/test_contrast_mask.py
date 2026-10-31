@@ -158,6 +158,25 @@ class TestContrastMaskMatte(unittest.TestCase):
     def setUp(self):
         self.image = _wide_range_negative(120, 180)
 
+    def test_cpu_preview_reapplies_exposure_when_async_matte_becomes_ready(self):
+        from negpy.services.assets import sky_matte
+
+        engine = DarkroomEngine()
+        settings = _bw_settings(grade=60.0, contrast_mask_strength=1.0, contrast_mask_sky_only=True)
+        requests = 0
+
+        def finish_after_first_render(image, _key, _wait, _on_status, **_kwargs):
+            nonlocal requests
+            requests += 1
+            return None if requests == 1 else np.zeros(image.shape[:2], dtype=np.float32)
+
+        with patch.object(sky_matte, "get_sky_matte", side_effect=finish_after_first_render):
+            unrestricted = engine.process(self.image.copy(), settings, "same-preview-source")
+            restricted = engine.process(self.image.copy(), settings, "same-preview-source")
+
+        self.assertEqual(requests, 2)
+        self.assertGreater(float(np.abs(unrestricted - restricted).mean()), 1e-4)
+
     def test_disabled_sky_restriction_returns_full_coverage_without_inference(self):
         from negpy.services.assets import sky_matte
 
@@ -180,15 +199,16 @@ class TestContrastMaskMatte(unittest.TestCase):
         expected = sky_matte.rough_positive_proxy(normalized_log)
         observed = {}
 
-        def fake_get_matte(image, _key, wait, _on_status):
-            observed.update(image=image, wait=wait)
+        def fake_get_matte(image, _key, wait, _on_status, **_kwargs):
+            observed.update(image=image, wait=wait, preview=_kwargs["preview"])
             return np.full(image.shape[:2], 0.25, dtype=np.float32)
 
         with patch.object(sky_matte, "get_sky_matte", side_effect=fake_get_matte):
-            plane = contrast_mask_matte_plane(self.image, _BOUNDS, None, True, wait=True)
+            plane = contrast_mask_matte_plane(self.image, _BOUNDS, None, True, wait=True, preview=False)
 
         np.testing.assert_array_equal(observed["image"], expected)
         self.assertTrue(observed["wait"])
+        self.assertFalse(observed["preview"])
         np.testing.assert_array_equal(plane, 0.25)
 
 
@@ -334,7 +354,7 @@ class TestContrastMaskParity(unittest.TestCase):
         with patch.object(
             sky_matte,
             "get_sky_matte",
-            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+            side_effect=lambda image, _key, _wait, _done, **_kwargs: np.full(image.shape[:2], 0.5, dtype=np.float32),
         ):
             self._assert_match(settings, "contrast-mask-sky-only-rotated-crop")
 
@@ -357,7 +377,7 @@ class TestContrastMaskParity(unittest.TestCase):
         with patch.object(
             sky_matte,
             "get_sky_matte",
-            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+            side_effect=lambda image, _key, _wait, _done, **_kwargs: np.full(image.shape[:2], 0.5, dtype=np.float32),
         ):
             self._render(
                 replace(base, exposure=replace(base.exposure, contrast_mask_sky_only=True)), "contrast-mask-matte-cache", prefer_gpu=True
@@ -368,10 +388,28 @@ class TestContrastMaskParity(unittest.TestCase):
         with patch.object(
             sky_matte,
             "get_sky_matte",
-            side_effect=lambda image, _key, _wait, _done: np.full(image.shape[:2], 0.5, dtype=np.float32),
+            side_effect=lambda image, _key, _wait, _done, **_kwargs: np.full(image.shape[:2], 0.5, dtype=np.float32),
         ):
             self._render(base, "contrast-mask-matte-cache", prefer_gpu=True)
         self.assertNotEqual(engine._matte_tex_key, matte_key)
+
+    def test_gpu_preview_reapplies_exposure_when_async_matte_becomes_ready(self):
+        from negpy.services.assets import sky_matte
+
+        settings = _bw_settings(grade=60.0, contrast_mask_strength=1.0, contrast_mask_sky_only=True)
+        requests = 0
+
+        def finish_after_first_render(image, _key, _wait, _on_status, **_kwargs):
+            nonlocal requests
+            requests += 1
+            return None if requests == 1 else np.zeros(image.shape[:2], dtype=np.float32)
+
+        with patch.object(sky_matte, "get_sky_matte", side_effect=finish_after_first_render):
+            unrestricted = self._render(settings, "same-gpu-preview-source", prefer_gpu=True)
+            restricted = self._render(settings, "same-gpu-preview-source", prefer_gpu=True)
+
+        self.assertEqual(requests, 2)
+        self.assertGreater(float(np.abs(unrestricted - restricted).mean()), 1e-4)
 
     def test_gpu_matte_completion_reports_the_original_source_hash(self):
         from unittest.mock import Mock, patch
@@ -380,8 +418,10 @@ class TestContrastMaskParity(unittest.TestCase):
         settings = _bw_settings(contrast_mask_strength=1.0, contrast_mask_sky_only=True)
         callback = Mock()
         self.processor.on_sky_matte_status = callback
+        observed = {}
 
-        def finish_matte(image, _key, _wait, on_status):
+        def finish_matte(image, _key, _wait, on_status, **_kwargs):
+            observed.update(preview=_kwargs["preview"])
             if on_status is not None:
                 on_status("calculating", None)
                 on_status("done", None)
@@ -402,6 +442,33 @@ class TestContrastMaskParity(unittest.TestCase):
         self.assertEqual(callback.call_args_list[0].args[2], "calculating")
         self.assertEqual(callback.call_args_list[1].args[2], "done")
         self.assertIsNone(callback.call_args_list[1].args[3])
+        self.assertTrue(observed["preview"])
+
+    def test_cpu_export_matte_is_transient(self):
+        from unittest.mock import patch
+        from negpy.services.assets import sky_matte
+
+        settings = _bw_settings(contrast_mask_strength=1.0, contrast_mask_sky_only=True)
+        observed = {}
+
+        def finish_matte(image, _key, wait, _on_status, **kwargs):
+            observed.update(wait=wait, preview=kwargs["preview"])
+            return np.ones(image.shape[:2], dtype=np.float32)
+
+        with patch.object(sky_matte, "get_sky_matte", side_effect=finish_matte):
+            self.processor.run_pipeline(
+                self.img.copy(),
+                settings,
+                "cpu-export-source",
+                render_size_ref=float(max(self.img.shape[:2])),
+                prefer_gpu=False,
+                cache_stages=False,
+                wait_for_sky_matte=True,
+            )
+
+        self.assertTrue(observed["wait"])
+        self.assertFalse(observed["preview"])
+        self.assertIsNone(self.processor.engine_cpu._mask_matte)
 
 
 if __name__ == "__main__":

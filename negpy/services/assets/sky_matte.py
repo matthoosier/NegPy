@@ -6,7 +6,8 @@ import os
 import threading
 import urllib.request
 import hashlib
-from collections import OrderedDict
+import errno
+from dataclasses import dataclass, field
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Optional
 
@@ -38,11 +39,21 @@ _CHUNK_SIZE = 256 * 1024
 _DOWNLOAD_LOCK = threading.Lock()
 _MATTE_CACHE_VERSION = 1
 _MATTE_CACHE_LOCK = threading.Lock()
-_MATTE_CACHE_MEMORY: OrderedDict[str, np.ndarray] = OrderedDict()
-_MATTE_CACHE_LIMIT = 8
-_MATTE_FUTURES: dict[str, tuple[Future[np.ndarray], list[Callable[[str, Optional[Exception]], None]]]] = {}
+_MATTE_PREVIEW_KEY: Optional[str] = None
+_MATTE_PREVIEW_VALUE: Optional[np.ndarray] = None
+_MATTE_PREVIEW_GENERATION = 0
+_MATTE_FUTURES: dict[str, "_PendingMatte"] = {}
 _MATTE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sky-matte")
 _MATTE_MODEL = None
+_LEGACY_CACHE_CLEANUP_LOCK = threading.Lock()
+_LEGACY_CACHE_CLEANUP_DONE = False
+
+
+@dataclass
+class _PendingMatte:
+    future: Future[np.ndarray]
+    callbacks: list[tuple[Optional[int], Callable[[str, Optional[Exception]], None]]] = field(default_factory=list)
+    preview_generations: set[int] = field(default_factory=set)
 
 
 class SkyMatteError(RuntimeError):
@@ -254,64 +265,62 @@ def sky_matte_cache_key(image_rgb: np.ndarray, identity: object = None) -> str:
     return digest.hexdigest()
 
 
-def _matte_path(key: str) -> str:
-    return os.path.join(APP_CONFIG.cache_dir, "sky_matte", "mattes", str(_MATTE_CACHE_VERSION), f"{key}.npy")
-
-
-def _remember_matte(key: str, matte: np.ndarray) -> np.ndarray:
-    result = np.ascontiguousarray(matte, dtype=np.float32)
+def clear_sky_matte_preview_cache() -> None:
+    """Drop the retained matte and invalidate preview work for the previous frame."""
+    global _MATTE_PREVIEW_GENERATION, _MATTE_PREVIEW_KEY, _MATTE_PREVIEW_VALUE
     with _MATTE_CACHE_LOCK:
-        _MATTE_CACHE_MEMORY[key] = result
-        _MATTE_CACHE_MEMORY.move_to_end(key)
-        while len(_MATTE_CACHE_MEMORY) > _MATTE_CACHE_LIMIT:
-            _MATTE_CACHE_MEMORY.popitem(last=False)
-    return result
+        _MATTE_PREVIEW_GENERATION += 1
+        _MATTE_PREVIEW_KEY = None
+        _MATTE_PREVIEW_VALUE = None
 
 
-def load_cached_sky_matte(key: str, shape: tuple[int, int]) -> Optional[np.ndarray]:
-    """Load a validated matte from memory or the disposable application cache."""
-    with _MATTE_CACHE_LOCK:
-        matte = _MATTE_CACHE_MEMORY.get(key)
-        if matte is not None:
-            _MATTE_CACHE_MEMORY.move_to_end(key)
-            if matte.shape == shape and np.isfinite(matte).all():
-                return matte
-            _MATTE_CACHE_MEMORY.pop(key, None)
+def purge_legacy_sky_matte_cache() -> None:
+    """Remove old derived matte files without touching the downloaded model."""
+    global _LEGACY_CACHE_CLEANUP_DONE
+    with _LEGACY_CACHE_CLEANUP_LOCK:
+        if _LEGACY_CACHE_CLEANUP_DONE:
+            return
+        root = os.path.join(APP_CONFIG.cache_dir, "sky_matte", "mattes")
+        cleanup_ok = True
+        if os.path.isdir(root):
 
-    path = _matte_path(key)
-    try:
-        matte = np.load(path, allow_pickle=False)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError):
-        logger.warning("Ignoring invalid cached sky matte %s", path, exc_info=True)
-        return None
-    if matte.dtype != np.float32 or matte.shape != shape or not np.isfinite(matte).all():
-        logger.warning("Ignoring incompatible cached sky matte %s", path)
-        return None
-    return _remember_matte(key, np.clip(matte, 0.0, 1.0))
+            def report_walk_error(error: OSError) -> None:
+                nonlocal cleanup_ok
+                cleanup_ok = False
+                logger.warning("Could not inspect obsolete sky matte cache: %s", error)
+
+            for directory, subdirectories, filenames in os.walk(root, topdown=False, onerror=report_walk_error):
+                for filename in filenames:
+                    if not (filename.endswith(".npy") or filename.endswith(".part")):
+                        continue
+                    path = os.path.join(directory, filename)
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        cleanup_ok = False
+                        logger.warning("Could not remove obsolete sky matte cache file %s", path, exc_info=True)
+                for subdirectory in subdirectories:
+                    path = os.path.join(directory, subdirectory)
+                    try:
+                        os.rmdir(path)
+                    except OSError as exc:
+                        if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                            cleanup_ok = False
+                            logger.warning("Could not remove obsolete sky matte cache directory %s", path, exc_info=True)
+            try:
+                os.rmdir(root)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    cleanup_ok = False
+                    logger.warning("Could not remove obsolete sky matte cache directory %s", root, exc_info=True)
+        _LEGACY_CACHE_CLEANUP_DONE = cleanup_ok
 
 
-def _make_cached_sky_matte(key: str, image_rgb: np.ndarray) -> np.ndarray:
+def _make_sky_matte(image_rgb: np.ndarray) -> np.ndarray:
     global _MATTE_MODEL
-    cached = load_cached_sky_matte(key, image_rgb.shape[:2])
-    if cached is not None:
-        return cached
     if _MATTE_MODEL is None:
         _MATTE_MODEL = SkyMatteModel()
-    matte = make_sky_matte(image_rgb, _MATTE_MODEL)
-    matte = _remember_matte(key, matte)
-    path = _matte_path(key)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = f"{path}.{threading.get_ident()}.part"
-    try:
-        with open(temporary, "wb") as output:
-            np.save(output, matte, allow_pickle=False)
-        os.replace(temporary, path)
-    except OSError:
-        _discard(temporary)
-        logger.exception("Could not save cached sky matte %s", path)
-    return matte
+    return make_sky_matte(image_rgb, _MATTE_MODEL)
 
 
 def get_sky_matte(
@@ -319,48 +328,85 @@ def get_sky_matte(
     key: str,
     wait: bool,
     on_status: Optional[Callable[[str, Optional[Exception]], None]] = None,
+    *,
+    preview: bool = True,
 ) -> Optional[np.ndarray]:
-    """Return a cached matte, wait for one, or queue one background inference."""
+    """Return the active preview matte, compute an export matte, or queue inference."""
+    global _MATTE_PREVIEW_GENERATION, _MATTE_PREVIEW_KEY, _MATTE_PREVIEW_VALUE
+    purge_legacy_sky_matte_cache()
     image = np.ascontiguousarray(np.clip(image_rgb, 0.0, 1.0), dtype=np.float32)
-    cached = load_cached_sky_matte(key, image.shape[:2])
+    watch_future = False
+    generation: Optional[int] = None
+    cached: Optional[np.ndarray] = None
+    with _MATTE_CACHE_LOCK:
+        if preview:
+            if _MATTE_PREVIEW_KEY != key:
+                _MATTE_PREVIEW_GENERATION += 1
+                _MATTE_PREVIEW_KEY = key
+                _MATTE_PREVIEW_VALUE = None
+            generation = _MATTE_PREVIEW_GENERATION
+            matte = _MATTE_PREVIEW_VALUE
+            if matte is not None:
+                if matte.shape == image.shape[:2] and np.isfinite(matte).all():
+                    cached = matte
+                else:
+                    _MATTE_PREVIEW_VALUE = None
+        if cached is not None:
+            pending = None
+        else:
+            pending = _MATTE_FUTURES.get(key)
+            if pending is None:
+                future = _MATTE_EXECUTOR.submit(_make_sky_matte, image.copy())
+                pending = _PendingMatte(future)
+                _MATTE_FUTURES[key] = pending
+                watch_future = True
+            if preview and generation is not None:
+                pending.preview_generations.add(generation)
+            if on_status is not None:
+                pending.callbacks.append((generation if preview else None, on_status))
+
     if cached is not None:
         if on_status is not None:
             on_status("done", None)
         return cached
-    watch_future = False
-    with _MATTE_CACHE_LOCK:
-        pending = _MATTE_FUTURES.get(key)
-        if pending is None:
-            future = _MATTE_EXECUTOR.submit(_make_cached_sky_matte, key, image.copy())
-            callbacks = [on_status] if on_status is not None else []
-            _MATTE_FUTURES[key] = (future, callbacks)
-            pending = _MATTE_FUTURES[key]
-            watch_future = True
-        elif on_status is not None:
-            pending[1].append(on_status)
-        if on_status is not None:
-            on_status("calculating", None)
+    assert pending is not None
+    if on_status is not None:
+        on_status("calculating", None)
     if watch_future:
-        pending[0].add_done_callback(lambda completed, cache_key=key: _finish_sky_matte(cache_key, completed))
+        pending.future.add_done_callback(lambda completed, cache_key=key: _finish_sky_matte(cache_key, completed))
     if not wait:
         return None
-    return pending[0].result()
+    return pending.future.result()
 
 
 def _finish_sky_matte(key: str, future: Future[np.ndarray]) -> None:
+    global _MATTE_PREVIEW_VALUE
     with _MATTE_CACHE_LOCK:
         pending = _MATTE_FUTURES.pop(key, None)
     if pending is None:
         return
     try:
-        future.result()
+        matte = np.ascontiguousarray(future.result(), dtype=np.float32)
     except Exception as exc:
-        logger.exception("Background sky matte generation failed")
-        for callback in pending[1]:
+        logger.exception("Sky matte generation failed")
+        for generation, callback in pending.callbacks:
+            if generation is not None and not _is_current_preview(key, generation):
+                continue
             callback("failed", exc)
     else:
-        for callback in pending[1]:
+        with _MATTE_CACHE_LOCK:
+            current_generation = _MATTE_PREVIEW_GENERATION
+            if _MATTE_PREVIEW_KEY == key and current_generation in pending.preview_generations:
+                _MATTE_PREVIEW_VALUE = matte
+        for generation, callback in pending.callbacks:
+            if generation is not None and not _is_current_preview(key, generation):
+                continue
             callback("done", None)
+
+
+def _is_current_preview(key: str, generation: int) -> bool:
+    with _MATTE_CACHE_LOCK:
+        return _MATTE_PREVIEW_KEY == key and _MATTE_PREVIEW_GENERATION == generation
 
 
 def _make_trimap(probability: np.ndarray) -> np.ndarray:

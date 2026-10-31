@@ -162,6 +162,7 @@ class DarkroomEngine:
         if self.cache.source_hash != source_hash:
             self.cache.clear()
             self.cache.source_hash = source_hash
+            self._mask_matte = None
             pipeline_changed = True
 
         if self.cache.process_mode != settings.process.process_mode:
@@ -264,6 +265,7 @@ class DarkroomEngine:
         # Pre-trim bounds, as on the GPU: White/Black Point trims are a look, not the source.
         mask_bounds = context.metrics.get("pre_trim_bounds", context.metrics.get("final_bounds"))
         # Print curve only, as Diffusion: the transfer curve and the Flat master take no plane.
+        matte_stage_key = None
         if (
             (settings.exposure.contrast_mask_strength > 0.0 or settings.exposure.contrast_mask_sky_only)
             and mask_bounds is not None
@@ -291,7 +293,7 @@ class DarkroomEngine:
                 _, _, normalized_mask_input = contrast_mask_plane_with_input(
                     img,
                     mask_bounds,
-                    effective_crosstalk_matrix(settings.process, settings.process_mode),
+                    effective_crosstalk_matrix(settings.process, settings.process.process_mode),
                     roi_norm=normalized_roi(mask_roi, current_img.shape[:2]),
                     bw_weights=bw_weights,
                     **geometry_kwargs(settings.geometry, distortion_k1),
@@ -317,6 +319,7 @@ class DarkroomEngine:
                     normalized_log=normalized_mask_input,
                     wait=context.wait_for_sky_matte,
                     identity=(source_hash, base_key, mask_roi),
+                    preview=not context.wait_for_sky_matte,
                     on_status=(
                         lambda matte_status,
                         error,
@@ -330,12 +333,18 @@ class DarkroomEngine:
                 )
                 expanded_matte = expand_mask_plane(matte, current_img.shape[:2], mask_roi)
                 ready_key = (*matte_key, matte_ready)
+                matte_stage_key = ready_key
                 if matte_ready:
-                    self._mask_matte = None if expanded_matte is None else (ready_key, expanded_matte)
+                    if context.cache_stages and expanded_matte is not None:
+                        self._mask_matte = (ready_key, expanded_matte)
+                    else:
+                        self._mask_matte = None
+                        context.metrics["contrast_mask_matte"] = expanded_matte
                 else:
                     self._mask_matte = None
                     context.metrics["contrast_mask_matte"] = expanded_matte
             if self._mask_matte is not None:
+                matte_stage_key = self._mask_matte[0]
                 context.metrics["contrast_mask_matte"] = self._mask_matte[1]
                 if context.sky_matte_status is not None:
                     context.sky_matte_status(source_hash, settings, "done", None)
@@ -386,7 +395,13 @@ class DarkroomEngine:
         # Dodge/burn masks are print-exposure inputs, so they key this stage.
         current_img, pipeline_changed = self._run_stage(
             current_img,
-            (settings.exposure, settings.local, settings.process.hue_trim, collapse_weights(settings.process, settings.exposure)),
+            (
+                settings.exposure,
+                settings.local,
+                settings.process.hue_trim,
+                collapse_weights(settings.process, settings.exposure),
+                matte_stage_key,
+            ),
             "exposure",
             run_exposure,
             context,
